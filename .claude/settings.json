@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "mcp-obsidian": {
+      "command": "/home/user/.local/bin/uvx",
+      "args": ["mcp-obsidian"],
+      "env": {
+        "OBSIDIAN_API_KEY": "yourobsidiankey"
+      }
+    }
+  }
+}
