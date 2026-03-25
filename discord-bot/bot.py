@@ -188,8 +188,16 @@ async def on_message(message: discord.Message):
             # Build Claude conversation
             messages = build_conversation(message, history)
 
-            # Get Claude response
-            response_text = await get_claude_response(messages)
+            # Get Claude response (120s timeout to prevent infinite typing)
+            try:
+                response_text = await asyncio.wait_for(get_claude_response(messages), timeout=120)
+            except asyncio.TimeoutError:
+                await message.reply("Timed out thinking about that — try again.", mention_author=False)
+                return
+
+            if not response_text.strip():
+                await message.reply("(I processed that but had nothing to say — try rephrasing.)", mention_author=False)
+                return
 
             # Send (split if needed)
             chunks = split_response(response_text)
@@ -203,7 +211,7 @@ async def on_message(message: discord.Message):
             )
         except anthropic.APIError as e:
             await message.reply(
-                f"API error: {e.message}",
+                f"API error: {str(e)}",
                 mention_author=False,
             )
         except Exception as e:
