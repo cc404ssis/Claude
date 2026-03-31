@@ -101,22 +101,30 @@ def build_conversation(message: discord.Message, history: list[discord.Message])
 
 
 async def get_claude_response(messages: list[dict]) -> str:
-    """Call Claude Opus 4.6 with streaming and adaptive thinking."""
+    """Call Claude Opus 4.6 with streaming and adaptive thinking. Retries on overload."""
     client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    max_retries = 3
+    delay = 2
 
-    full_response = ""
-
-    async with client.messages.stream(
-        model="claude-opus-4-6",
-        max_tokens=4096,
-        thinking={"type": "adaptive"},
-        system=SYSTEM_PROMPT,
-        messages=messages,
-    ) as stream:
-        async for text in stream.text_stream:
-            full_response += text
-
-    return full_response
+    for attempt in range(max_retries):
+        try:
+            full_response = ""
+            async with client.messages.stream(
+                model="claude-opus-4-6",
+                max_tokens=4096,
+                thinking={"type": "adaptive"},
+                system=SYSTEM_PROMPT,
+                messages=messages,
+            ) as stream:
+                async for text in stream.text_stream:
+                    full_response += text
+            return full_response
+        except anthropic.APIStatusError as e:
+            if e.status_code == 529 and attempt < max_retries - 1:
+                await asyncio.sleep(delay)
+                delay *= 2
+                continue
+            raise
 
 
 def split_response(text: str, limit: int = MAX_RESPONSE_LENGTH) -> list[str]:
