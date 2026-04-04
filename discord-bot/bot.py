@@ -126,11 +126,49 @@ async def context_refresh_loop():
             print(f"Context refresh failed: {e}")
 
 
-def build_conversation(message: discord.Message, history: list[discord.Message]) -> list[dict]:
+IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+MAX_IMAGE_SIZE = 20 * 1024 * 1024  # 20 MB
+
+
+async def download_image(attachment: discord.Attachment) -> dict | None:
+    """Download a Discord image attachment and return a Claude image content block."""
+    content_type = (attachment.content_type or "").split(";")[0]
+    if content_type not in IMAGE_TYPES:
+        return None
+    if attachment.size > MAX_IMAGE_SIZE:
+        return None
+    try:
+        data = await attachment.read()
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": content_type,
+                "data": base64.b64encode(data).decode("utf-8"),
+            },
+        }
+    except Exception:
+        return None
+
+
+def _merge_content(existing, new_content):
+    """Merge two content values, handling both string and list-of-blocks formats."""
+    if isinstance(existing, str) and isinstance(new_content, str):
+        return existing + "\n" + new_content
+    # At least one side has image blocks — normalize both to lists
+    if isinstance(existing, str):
+        existing = [{"type": "text", "text": existing}]
+    if isinstance(new_content, str):
+        new_content = [{"type": "text", "text": new_content}]
+    return existing + new_content
+
+
+async def build_conversation(message: discord.Message, history: list[discord.Message]) -> list[dict]:
     """
     Build a Claude conversation from Discord channel history.
     History is oldest-first (already reversed from Discord's newest-first fetch).
     The triggering message is appended at the end as the final user turn.
+    Supports image attachments via Claude's vision API.
     """
     messages = []
 
@@ -138,23 +176,33 @@ def build_conversation(message: discord.Message, history: list[discord.Message])
         if msg.id == message.id:
             continue  # Skip the trigger message — we'll add it at the end
 
-        if not msg.content.strip():
+        # Download any image attachments
+        image_blocks = []
+        for att in msg.attachments:
+            block = await download_image(att)
+            if block:
+                image_blocks.append(block)
+
+        text = msg.content.strip()
+        if not text and not image_blocks:
             continue
 
         # Label bot messages by name so Claude knows who said what
         if msg.author.bot:
-            author_label = f"[{msg.author.display_name}]"
-            content = f"{author_label} {msg.content}"
-        else:
-            content = msg.content
+            text = f"[{msg.author.display_name}] {text}" if text else f"[{msg.author.display_name}] (shared an image)"
+        elif not text:
+            text = "(shared an image)"
 
         # Alternate user/assistant roles: human messages → user, bots → assistant
         # This keeps Claude's conversation format valid
         role = "assistant" if msg.author.bot else "user"
 
+        # Build content: list format if images present, string otherwise
+        content = image_blocks + [{"type": "text", "text": text}] if image_blocks else text
+
         # Merge consecutive same-role messages
         if messages and messages[-1]["role"] == role:
-            messages[-1]["content"] += f"\n{content}"
+            messages[-1]["content"] = _merge_content(messages[-1]["content"], content)
         else:
             messages.append({"role": role, "content": content})
 
@@ -167,19 +215,30 @@ def build_conversation(message: discord.Message, history: list[discord.Message])
         )
     clean_content = clean_content.strip()
 
-    if not clean_content:
+    # Download images from the triggering message
+    trigger_images = []
+    for att in message.attachments:
+        block = await download_image(att)
+        if block:
+            trigger_images.append(block)
+
+    if not clean_content and not trigger_images:
         clean_content = "(pinged with no additional text)"
+    elif not clean_content:
+        clean_content = "(shared an image)"
+
+    trigger_content = trigger_images + [{"type": "text", "text": clean_content}] if trigger_images else clean_content
 
     if messages and messages[-1]["role"] == "user":
-        messages[-1]["content"] += f"\n{clean_content}"
+        messages[-1]["content"] = _merge_content(messages[-1]["content"], trigger_content)
     else:
-        messages.append({"role": "user", "content": clean_content})
+        messages.append({"role": "user", "content": trigger_content})
 
     # Claude API requires messages to start with 'user'
     if messages and messages[0]["role"] == "assistant":
         messages = messages[1:]
 
-    return messages if messages else [{"role": "user", "content": clean_content}]
+    return messages if messages else [{"role": "user", "content": trigger_content}]
 
 
 async def get_claude_response(messages: list[dict]) -> str:
@@ -291,8 +350,8 @@ async def on_message(message: discord.Message):
             # history() returns newest-first — reverse to chronological order
             history = list(reversed(raw_history))
 
-            # Build Claude conversation
-            messages = build_conversation(message, history)
+            # Build Claude conversation (async to support image downloads)
+            messages = await build_conversation(message, history)
 
             # Get Claude response (120s timeout to prevent infinite typing)
             try:
