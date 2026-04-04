@@ -312,15 +312,14 @@ async def build_conversation(message: discord.Message, history: list[discord.Mes
         if msg.id == message.id:
             continue  # Skip the trigger message — we'll add it at the end
 
-        # Download any image attachments
-        image_blocks = []
-        for att in msg.attachments:
-            block = await download_image(att)
-            if block:
-                image_blocks.append(block)
+        # Note image attachments in history but don't download them
+        # (downloading base64 images from 20 messages blows up request size → 413)
+        has_images = any(
+            (att.content_type or "").split(";")[0] in IMAGE_TYPES for att in msg.attachments
+        )
 
         text = msg.content.strip()
-        if not text and not image_blocks:
+        if not text and not has_images:
             continue
 
         # Label bot messages by name so Claude knows who said what
@@ -333,8 +332,8 @@ async def build_conversation(message: discord.Message, history: list[discord.Mes
         # This keeps Claude's conversation format valid
         role = "assistant" if msg.author.bot else "user"
 
-        # Build content: list format if images present, string otherwise
-        content = image_blocks + [{"type": "text", "text": text}] if image_blocks else text
+        # History messages are text-only (images noted but not downloaded)
+        content = text
 
         # Merge consecutive same-role messages
         if messages and messages[-1]["role"] == role:
