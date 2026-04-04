@@ -83,6 +83,22 @@ PROJECT_CONTEXT = """## Active Projects
 | Awaken Wellness | Active | In progress |
 | UGENC-SSIS | Active | /Users/chrisclegg/UGENC-SSIS/ |
 
+## Discord Bot Registry
+
+**CB404 (you)** — Claude Opus 4.6 bot, live on Railway. 24/7 presence in Studio404 Discord.
+Repo: cc404ssis/Claude. Auto-deploys from branch claude/create-claude-md-screenshot-AWbhV.
+
+**SIE_CC_BOT** — Claude Code Discord bridge bot. Technical execution bot with export and run capabilities.
+- Commands: !ping, !ask, !export, !exportchannels, !run, !help, @mention
+- !export uses DiscordChatExporter CLI to incrementally export Studio404 channels
+- Built with discord.py + claude-sonnet-4-20250514
+- Code lives at: ~/.claude/skills/sovereign-intelligence-engine/sie-cc-bot/main.py
+- Status: deployment location unconfirmed — investigating Railway vs local process
+
+**Studio404Exporter** — Passive read-only bot. Used only for DiscordChatExporter CLI authentication. Cannot receive or respond to messages.
+
+**Kimi Claw** — Full-context AI assistant via OpenClaw gateway. Long-term memory, cross-platform (Discord/WhatsApp/Telegram). Handles operations, execution, coordination.
+
 ## Trinity Brain Vault
 Shared memory for all AI instances. GitHub: cc404ssis/TRINITYBRAIN
 Local path: /Users/chrisclegg/OBSIDIAN/TRINITYBRAIN/
@@ -256,7 +272,7 @@ async def get_claude_response(messages: list[dict]) -> str:
                     model=model,
                     max_tokens=4096,
                     thinking={"type": "adaptive"},
-                    system=f"{SYSTEM_PROMPT}\n\n{_dynamic_context if _dynamic_context else PROJECT_CONTEXT}",
+                    system=f"{SYSTEM_PROMPT}\n\n{PROJECT_CONTEXT}" + (f"\n\n## Live Priorities\n{_dynamic_context}" if _dynamic_context else ""),
                     messages=messages,
                 ) as stream:
                     async for text in stream.text_stream:
