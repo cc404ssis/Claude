@@ -23,7 +23,7 @@ load_dotenv()
 
 DISCORD_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_TOKEN = os.environ.get("TRINITYBRAIN_GITHUB_TOKEN", "")
 HISTORY_LIMIT = int(os.environ.get("HISTORY_LIMIT", "20"))
 MAX_RESPONSE_LENGTH = 1900  # Discord limit is 2000; leave margin
 
