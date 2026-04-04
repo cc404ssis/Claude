@@ -11,6 +11,9 @@ Core rules:
 
 import os
 import asyncio
+import base64
+import json
+import urllib.request
 import discord
 from discord.ext import commands
 import anthropic
@@ -20,8 +23,11 @@ load_dotenv()
 
 DISCORD_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 HISTORY_LIMIT = int(os.environ.get("HISTORY_LIMIT", "20"))
 MAX_RESPONSE_LENGTH = 1900  # Discord limit is 2000; leave margin
+
+_dynamic_context: str = ""  # Loaded from Trinity Brain at startup; falls back to PROJECT_CONTEXT
 
 # ── Identity (rarely changes) ──────────────────────────────────────────────────
 # Update only if the studio structure itself changes.
@@ -82,6 +88,42 @@ Shared memory for all AI instances. GitHub: cc404ssis/TRINITYBRAIN
 Local path: /Users/chrisclegg/OBSIDIAN/TRINITYBRAIN/
 Contains: session logs, project state, agent profiles, decisions, priorities.
 Claude Code pulls and pushes this vault at the start and end of every session."""
+
+
+async def fetch_priorities() -> str:
+    """Fetch PRIORITIES.md from Trinity Brain vault on GitHub. Returns '' on failure."""
+    if not GITHUB_TOKEN:
+        return ""
+    url = (
+        "https://api.github.com/repos/cc404ssis/TRINITYBRAIN/contents/"
+        "%F0%9F%A7%A0%20SYSTEM/PRIORITIES.md"
+    )
+
+    def _fetch() -> str:
+        req = urllib.request.Request(url)
+        req.add_header("Authorization", f"token {GITHUB_TOKEN}")
+        req.add_header("Accept", "application/vnd.github.v3+json")
+        req.add_header("User-Agent", "CB404-Discord-Bot")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        return base64.b64decode(data["content"]).decode("utf-8")
+
+    return await asyncio.to_thread(_fetch)
+
+
+async def context_refresh_loop():
+    """Refresh PRIORITIES.md from Trinity Brain every hour."""
+    global _dynamic_context
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        await asyncio.sleep(3600)
+        try:
+            fresh = await fetch_priorities()
+            if fresh:
+                _dynamic_context = fresh
+                print("Context refreshed from Trinity Brain vault")
+        except Exception as e:
+            print(f"Context refresh failed: {e}")
 
 
 def build_conversation(message: discord.Message, history: list[discord.Message]) -> list[dict]:
@@ -155,7 +197,7 @@ async def get_claude_response(messages: list[dict]) -> str:
                     model=model,
                     max_tokens=4096,
                     thinking={"type": "adaptive"},
-                    system=f"{SYSTEM_PROMPT}\n\n{PROJECT_CONTEXT}",
+                    system=f"{SYSTEM_PROMPT}\n\n{_dynamic_context if _dynamic_context else PROJECT_CONTEXT}",
                     messages=messages,
                 ) as stream:
                     async for text in stream.text_stream:
@@ -215,8 +257,18 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
+    global _dynamic_context
     print(f"Claude bot online as {bot.user} (ID: {bot.user.id})")
     print(f"Connected to {len(bot.guilds)} server(s)")
+    try:
+        _dynamic_context = await fetch_priorities()
+        if _dynamic_context:
+            print("Loaded PRIORITIES.md from Trinity Brain vault")
+        else:
+            print("GITHUB_TOKEN not set or fetch failed — using static PROJECT_CONTEXT")
+    except Exception as e:
+        print(f"Could not load PRIORITIES.md: {e} — using static PROJECT_CONTEXT")
+    asyncio.get_event_loop().create_task(context_refresh_loop())
 
 
 @bot.event
