@@ -6,13 +6,14 @@ Core rules:
 - Only responds when @mentioned by a HUMAN (never triggered by other bots)
 - Reads recent channel history for context (sees Dr Mana + Kimi replies)
 - Never @mentions other bots in replies (prevents loops)
-- Uses Claude Opus 4.6 with adaptive thinking + streaming
+- Uses Claude Opus 4.6 with adaptive thinking + vault tool use
 """
 
 import os
 import asyncio
 import base64
 import json
+import urllib.parse
 import urllib.request
 import discord
 from discord.ext import commands
@@ -65,7 +66,14 @@ Multiple instances may be working on the same projects simultaneously — you ar
 - Bring structure: specs, outlines, decision frameworks, system designs.
 - Think before responding — you are the architect.
 - Working studio, not a chat room.
-- If Chris asks about a project you don't have context on, say so honestly — do not fabricate status."""
+- If Chris asks about a project you don't have context on, search the vault before saying you don't know — do not fabricate status.
+
+## Your Tools
+You can search the Trinity Brain vault directly using two tools:
+- **read_vault_file** — Read any file by path (e.g. '🧠 SYSTEM/PRIORITIES.md')
+- **list_vault_directory** — Browse directories to discover files (e.g. '📁 PROJECTS/active/')
+
+When asked about something you don't have full context on, search the vault first. Start by listing relevant directories, then read specific files. The vault is the shared source of truth for all AI instances."""
 
 
 # ── Project Context (update this freely) ──────────────────────────────────────
@@ -104,6 +112,118 @@ Shared memory for all AI instances. GitHub: cc404ssis/TRINITYBRAIN
 Local path: /Users/chrisclegg/OBSIDIAN/TRINITYBRAIN/
 Contains: session logs, project state, agent profiles, decisions, priorities.
 Claude Code pulls and pushes this vault at the start and end of every session."""
+
+
+# ── Vault Tools (on-demand vault access) ─────────────────────────────────────
+
+VAULT_TOOLS = [
+    {
+        "name": "read_vault_file",
+        "description": (
+            "Read a file from the Trinity Brain vault (shared knowledge base on GitHub). "
+            "Use when asked about projects, sessions, decisions, agent details, or anything in the vault."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "File path within the vault, e.g. "
+                        "'🧠 SYSTEM/PRIORITIES.md' or '📁 PROJECTS/active/studio404-interface/brief-v5.md'"
+                    ),
+                }
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "list_vault_directory",
+        "description": (
+            "List files and folders in a Trinity Brain vault directory. "
+            "Use to discover what files exist before reading them."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Directory path within the vault, e.g. "
+                        "'📁 PROJECTS/active/' or '💬 SESSIONS/'. Use '' for root."
+                    ),
+                }
+            },
+            "required": ["path"],
+        },
+    },
+]
+
+MAX_VAULT_FILE_SIZE = 12000  # Truncate large files to avoid blowing context
+
+
+async def fetch_vault_file(path: str) -> str:
+    """Fetch any file from Trinity Brain vault on GitHub."""
+    if not GITHUB_TOKEN:
+        return "Error: GITHUB_TOKEN not configured — cannot access vault"
+    encoded_path = urllib.parse.quote(path, safe="/")
+    url = f"https://api.github.com/repos/cc404ssis/TRINITYBRAIN/contents/{encoded_path}"
+
+    def _fetch():
+        req = urllib.request.Request(url)
+        req.add_header("Authorization", f"token {GITHUB_TOKEN}")
+        req.add_header("Accept", "application/vnd.github.v3+json")
+        req.add_header("User-Agent", "CB404-Discord-Bot")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        content = base64.b64decode(data["content"]).decode("utf-8")
+        if len(content) > MAX_VAULT_FILE_SIZE:
+            return content[:MAX_VAULT_FILE_SIZE] + (
+                f"\n\n[Truncated — file is {len(content)} chars, showing first {MAX_VAULT_FILE_SIZE}]"
+            )
+        return content
+
+    try:
+        return await asyncio.to_thread(_fetch)
+    except Exception as e:
+        return f"Error reading '{path}': {e}"
+
+
+async def list_vault_directory(path: str) -> str:
+    """List contents of a vault directory on GitHub."""
+    if not GITHUB_TOKEN:
+        return "Error: GITHUB_TOKEN not configured — cannot access vault"
+    encoded_path = urllib.parse.quote(path, safe="/") if path else ""
+    url = f"https://api.github.com/repos/cc404ssis/TRINITYBRAIN/contents/{encoded_path}"
+
+    def _fetch():
+        req = urllib.request.Request(url)
+        req.add_header("Authorization", f"token {GITHUB_TOKEN}")
+        req.add_header("Accept", "application/vnd.github.v3+json")
+        req.add_header("User-Agent", "CB404-Discord-Bot")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        if isinstance(data, list):
+            entries = []
+            for item in sorted(data, key=lambda x: (x["type"] != "dir", x["name"])):
+                icon = "\U0001f4c1" if item["type"] == "dir" else "\U0001f4c4"
+                entries.append(f"{icon} {item['name']}")
+            return "\n".join(entries)
+        return "Path is a file, not a directory. Use read_vault_file instead."
+
+    try:
+        return await asyncio.to_thread(_fetch)
+    except Exception as e:
+        return f"Error listing '{path}': {e}"
+
+
+async def execute_vault_tool(name: str, input_data: dict) -> str:
+    """Execute a vault tool and return the result as a string."""
+    if name == "read_vault_file":
+        return await fetch_vault_file(input_data["path"])
+    if name == "list_vault_directory":
+        return await list_vault_directory(input_data["path"])
+    return f"Unknown tool: {name}"
 
 
 async def fetch_priorities() -> str:
@@ -258,26 +378,59 @@ async def build_conversation(message: discord.Message, history: list[discord.Mes
 
 
 async def get_claude_response(messages: list[dict]) -> str:
-    """Call Claude with streaming. Uses Opus 4.6 with Sonnet 4.6 fallback on overload."""
+    """Call Claude with vault tool use. Uses Opus 4.6 with Sonnet 4.6 fallback on overload."""
     client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
     models = ["claude-opus-4-6", "claude-sonnet-4-6"]
+    system = (
+        f"{SYSTEM_PROMPT}\n\n{PROJECT_CONTEXT}"
+        + (f"\n\n## Live Priorities\n{_dynamic_context}" if _dynamic_context else "")
+    )
+    tools = VAULT_TOOLS if GITHUB_TOKEN else []
 
     for model in models:
         delay = 2
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                full_response = ""
-                async with client.messages.stream(
-                    model=model,
-                    max_tokens=4096,
-                    thinking={"type": "adaptive"},
-                    system=f"{SYSTEM_PROMPT}\n\n{PROJECT_CONTEXT}" + (f"\n\n## Live Priorities\n{_dynamic_context}" if _dynamic_context else ""),
-                    messages=messages,
-                ) as stream:
-                    async for text in stream.text_stream:
-                        full_response += text
-                return full_response
+                loop_messages = list(messages)
+
+                for _ in range(4):  # Max 4 tool rounds
+                    kwargs = dict(
+                        model=model,
+                        max_tokens=4096,
+                        thinking={"type": "adaptive"},
+                        system=system,
+                        messages=loop_messages,
+                    )
+                    if tools:
+                        kwargs["tools"] = tools
+
+                    response = await client.messages.create(**kwargs)
+
+                    if response.stop_reason != "tool_use":
+                        # Extract text blocks from final response
+                        return "".join(
+                            block.text for block in response.content if hasattr(block, "text")
+                        )
+
+                    # Execute any tool calls
+                    tool_results = []
+                    for block in response.content:
+                        if block.type == "tool_use":
+                            result = await execute_vault_tool(block.name, block.input)
+                            tool_results.append(
+                                {"type": "tool_result", "tool_use_id": block.id, "content": result}
+                            )
+
+                    # Feed tool results back for the next round
+                    loop_messages.append({"role": "assistant", "content": response.content})
+                    loop_messages.append({"role": "user", "content": tool_results})
+
+                # Exhausted tool rounds — return whatever text we have
+                return "".join(
+                    block.text for block in response.content if hasattr(block, "text")
+                )
+
             except anthropic.APIStatusError as e:
                 if e.status_code == 529 and attempt < max_retries - 1:
                     await asyncio.sleep(delay)
