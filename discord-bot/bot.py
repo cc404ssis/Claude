@@ -376,6 +376,47 @@ async def build_conversation(message: discord.Message, history: list[discord.Mes
     return messages if messages else [{"role": "user", "content": trigger_content}]
 
 
+async def classify_message_tier(text: str) -> str:
+    """Classify a message as SIMPLE or COMPLEX using Haiku. Returns 'simple' or 'complex'."""
+    client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    try:
+        response = await asyncio.wait_for(
+            client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=32,
+                system=(
+                    "Classify the user's message as SIMPLE or COMPLEX. Respond with one word only.\n"
+                    "SIMPLE: greetings, status checks, quick questions, acknowledgments, thank yous, "
+                    "short follow-ups, yes/no answers, casual chat.\n"
+                    "COMPLEX: architecture questions, code review, multi-step planning, tool use needed, "
+                    "project analysis, debugging, system design, vault lookups, anything requiring deep reasoning."
+                ),
+                messages=[{"role": "user", "content": text}],
+            ),
+            timeout=5,
+        )
+        result = response.content[0].text.strip().lower()
+        return "simple" if "simple" in result else "complex"
+    except Exception:
+        return "complex"  # Default to full pipeline on classification failure
+
+
+async def get_simple_response(messages: list[dict]) -> str:
+    """Handle simple messages with Haiku — no tools, no adaptive thinking."""
+    client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    system = (
+        f"{SYSTEM_PROMPT}\n\n{PROJECT_CONTEXT}"
+        + (f"\n\n## Live Priorities\n{_dynamic_context}" if _dynamic_context else "")
+    )
+    response = await client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=1024,
+        system=system,
+        messages=messages,
+    )
+    return "".join(block.text for block in response.content if hasattr(block, "text"))
+
+
 async def get_claude_response(messages: list[dict]) -> str:
     """Call Claude with vault tool use. Uses Opus 4.6 with Sonnet 4.6 fallback on overload."""
     client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
@@ -521,9 +562,19 @@ async def on_message(message: discord.Message):
             # Build Claude conversation (async to support image downloads)
             messages = await build_conversation(message, history)
 
-            # Get Claude response (120s timeout to prevent infinite typing)
+            # Classify message tier: simple → Haiku, complex → Opus
+            has_images = any(
+                (att.content_type or "").split(";")[0] in IMAGE_TYPES
+                for att in message.attachments
+            )
+            tier = "complex" if has_images else await classify_message_tier(message.content)
+
+            # Get response from appropriate model tier
             try:
-                response_text = await asyncio.wait_for(get_claude_response(messages), timeout=120)
+                if tier == "simple":
+                    response_text = await asyncio.wait_for(get_simple_response(messages), timeout=30)
+                else:
+                    response_text = await asyncio.wait_for(get_claude_response(messages), timeout=120)
             except asyncio.TimeoutError:
                 await message.reply("Timed out thinking about that — try again.", mention_author=False)
                 return
