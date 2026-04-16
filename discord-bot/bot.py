@@ -87,8 +87,10 @@ You have two sets of tools available:
 - **list_channels** — List all channels in the Studio404 server
 - **read_channel** — Read recent messages from any channel by name or ID
 - **list_members** — List server members with their roles
-- **pin_message** — Pin a message in the current channel
-- **create_thread** — Create a public thread in the current channel
+- **pin_message** — Pin a message (use `last_bot` to pin your own last message, or pass a message ID from read_channel)
+- **create_thread** — Create a public thread in the current channel or any specified channel
+- **create_category** — Create a new category in the server
+- **create_channel** — Create a new text channel, optionally inside a category
 - **send_to_channel** — Send a message to a different channel
 - **manage_role** — Add or remove a role from a member
 
@@ -294,8 +296,8 @@ DISCORD_TOOLS = [
     {
         "name": "read_channel",
         "description": (
-            "Read recent messages from any channel in the server. "
-            "Use to check what's being discussed in another channel."
+            "Read recent messages from any channel in the server, including message IDs. "
+            "Use to check what's being discussed in another channel, or to find a message ID before pinning."
         ),
         "input_schema": {
             "type": "object",
@@ -323,13 +325,17 @@ DISCORD_TOOLS = [
     },
     {
         "name": "pin_message",
-        "description": "Pin a message in the current channel by its message ID.",
+        "description": (
+            "Pin a message in the current channel. "
+            "Pass message_id='last_bot' to pin the most recent CB404 message in the channel. "
+            "Otherwise pass the specific message ID (use read_channel to find IDs)."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "message_id": {
                     "type": "string",
-                    "description": "The Discord message ID to pin.",
+                    "description": "Message ID to pin, or 'last_bot' to pin the most recent CB404 message.",
                 },
             },
             "required": ["message_id"],
@@ -337,13 +343,49 @@ DISCORD_TOOLS = [
     },
     {
         "name": "create_thread",
-        "description": "Create a public thread in the current channel.",
+        "description": "Create a public thread. Creates in the current channel by default, or in a specified channel.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "name": {
                     "type": "string",
                     "description": "Name for the new thread (max 100 characters).",
+                },
+                "channel": {
+                    "type": "string",
+                    "description": "Optional: channel name or ID to create the thread in. Defaults to current channel.",
+                },
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "create_category",
+        "description": "Create a new category in the Discord server.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the category to create.",
+                },
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "create_channel",
+        "description": "Create a new text channel in the server, optionally inside a category.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the channel to create (lowercase, no spaces — use hyphens).",
+                },
+                "category": {
+                    "type": "string",
+                    "description": "Optional: category name or ID to place the channel in.",
                 },
             },
             "required": ["name"],
@@ -470,7 +512,7 @@ async def execute_discord_tool(
             ts = msg.created_at.strftime("%Y-%m-%d %H:%M")
             text = (msg.content[:200] + "…") if len(msg.content) > 200 else (msg.content or "(no text)")
             attachment_note = f" [+{len(msg.attachments)} file(s)]" if msg.attachments else ""
-            lines.append(f"[{ts}] {msg.author.display_name}: {text}{attachment_note}")
+            lines.append(f"[{ts}] [ID:{msg.id}] {msg.author.display_name}: {text}{attachment_note}")
         return "\n".join(lines)
 
     # ── list_members ──
@@ -485,29 +527,81 @@ async def execute_discord_tool(
 
     # ── pin_message ──
     if name == "pin_message":
+        msg_id_raw = input_data["message_id"]
         try:
-            msg_id = int(input_data["message_id"])
-            msg = await ctx_message.channel.fetch_message(msg_id)
-            await msg.pin()
-            preview = (msg.content[:80] + "…") if len(msg.content) > 80 else msg.content
-            return f"Pinned message from {msg.author.display_name}: {preview}"
+            if msg_id_raw == "last_bot":
+                # Find the most recent CB404 message in the current channel
+                target_msg = None
+                async for m in ctx_message.channel.history(limit=50):
+                    if m.author == bot_ref.user:
+                        target_msg = m
+                        break
+                if not target_msg:
+                    return "No recent CB404 messages found in this channel to pin."
+            else:
+                target_msg = await ctx_message.channel.fetch_message(int(msg_id_raw))
+            await target_msg.pin()
+            preview = (target_msg.content[:80] + "…") if len(target_msg.content) > 80 else target_msg.content
+            return f"Pinned message from {target_msg.author.display_name}: {preview}"
         except discord.NotFound:
-            return f"Message ID {input_data['message_id']} not found in this channel."
+            return f"Message ID {msg_id_raw} not found in this channel."
         except discord.Forbidden:
             return "Error: Bot needs Manage Messages permission to pin."
         except ValueError:
-            return "Error: Invalid message ID — must be a number."
+            return "Error: Invalid message ID — must be a number or 'last_bot'."
 
     # ── create_thread ──
     if name == "create_thread":
         thread_name = input_data["name"][:100]
+        # Optionally create in a different channel
+        target_channel = ctx_message.channel
+        if input_data.get("channel"):
+            found = _find_channel(guild, input_data["channel"])
+            if not found:
+                return f"Channel '{input_data['channel']}' not found."
+            target_channel = found
         try:
-            thread = await ctx_message.create_thread(name=thread_name)
-            return f"Created thread '{thread.name}' (ID: {thread.id}) in #{ctx_message.channel.name}."
+            thread = await target_channel.create_thread(name=thread_name, type=discord.ChannelType.public_thread)
+            return f"Created thread '{thread.name}' (ID: {thread.id}) in #{target_channel.name}."
         except discord.Forbidden:
             return "Error: Bot needs Create Public Threads permission."
         except Exception as e:
             return f"Error creating thread: {e}"
+
+    # ── create_category ──
+    if name == "create_category":
+        try:
+            category = await guild.create_category(input_data["name"])
+            return f"Created category '{category.name}' (ID: {category.id})."
+        except discord.Forbidden:
+            return "Error: Bot needs Manage Channels permission to create categories."
+        except Exception as e:
+            return f"Error creating category: {e}"
+
+    # ── create_channel ──
+    if name == "create_channel":
+        category = None
+        if input_data.get("category"):
+            cat_name_or_id = input_data["category"]
+            try:
+                cat_id = int(cat_name_or_id)
+                category = guild.get_channel(cat_id)
+            except ValueError:
+                lower = cat_name_or_id.lower()
+                category = discord.utils.find(
+                    lambda c: isinstance(c, discord.CategoryChannel) and c.name.lower() == lower,
+                    guild.channels,
+                )
+            if not category:
+                return f"Category '{input_data['category']}' not found. Create it first with create_category."
+        try:
+            channel = await guild.create_text_channel(input_data["name"], category=category)
+            loc = f" in category '{category.name}'" if category else ""
+            return f"Created channel #{channel.name} (ID: {channel.id}){loc}."
+        except discord.Forbidden:
+            return "Error: Bot needs Manage Channels permission to create channels."
+        except Exception as e:
+            return f"Error creating channel: {e}"
 
     # ── send_to_channel ──
     if name == "send_to_channel":
