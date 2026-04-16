@@ -109,6 +109,7 @@ You have two sets of tools available:
 - **delete_role** — Delete a role
 - **manage_role** — Add or remove a role from a member
 - **set_channel_permissions** — Set permission overrides for a role or member in a channel
+- **move_message** — Simulate moving a message: copies to destination with attribution, deletes original
 
 When asked about a project, channel, or member you don't have context on — use your tools to look it up. The vault is the shared source of truth. Discord tools let you act on the server directly."""
 
@@ -661,6 +662,23 @@ DISCORD_TOOLS = [
             "required": ["channel", "target"],
         },
     },
+    {
+        "name": "move_message",
+        "description": (
+            "Simulate moving a message to another channel: copies the content to the destination "
+            "(with original author attribution and source link), then deletes the original. "
+            "Note: Discord has no native move — this is copy + delete."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_id": {"type": "string", "description": "Message ID to move."},
+                "from_channel": {"type": "string", "description": "Source channel name or ID."},
+                "to_channel": {"type": "string", "description": "Destination channel name or ID."},
+            },
+            "required": ["message_id", "from_channel", "to_channel"],
+        },
+    },
 ]
 
 DISCORD_TOOL_NAMES = {t["name"] for t in DISCORD_TOOLS}
@@ -1180,6 +1198,40 @@ async def execute_discord_tool(
             return "Error: Bot needs Manage Channels permission."
         except Exception as e:
             return f"Error setting permissions: {e}"
+
+    # ── move_message ──
+    if name == "move_message":
+        src = _find_channel(guild, input_data["from_channel"])
+        if not src:
+            return f"Source channel '{input_data['from_channel']}' not found."
+        dst = _find_channel(guild, input_data["to_channel"])
+        if not dst:
+            return f"Destination channel '{input_data['to_channel']}' not found."
+        try:
+            msg = await src.fetch_message(int(input_data["message_id"]))
+        except discord.NotFound:
+            return f"Message ID {input_data['message_id']} not found in #{src.name}."
+        except ValueError:
+            return "Error: Invalid message ID."
+        # Build forwarded content with attribution
+        jump_url = msg.jump_url
+        header = f"**Moved from #{src.name}** (originally by **{msg.author.display_name}**):\n"
+        body = msg.content or "(no text)"
+        forwarded = header + body
+        if len(forwarded) > 2000:
+            forwarded = forwarded[:1997] + "…"
+        try:
+            await dst.send(forwarded)
+            # Re-send any attachments as URLs (Discord CDN links)
+            if msg.attachments:
+                att_links = "\n".join(a.url for a in msg.attachments)
+                await dst.send(f"**Attachments from moved message:**\n{att_links}")
+            await msg.delete()
+            return f"Moved message from #{src.name} to #{dst.name} (copy + delete)."
+        except discord.Forbidden:
+            return "Error: Bot needs Send Messages permission in destination and Manage Messages in source."
+        except Exception as e:
+            return f"Error moving message: {e}"
 
     return f"Unknown Discord tool: {name}"
 
