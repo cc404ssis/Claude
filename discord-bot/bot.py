@@ -1217,14 +1217,14 @@ async def execute_discord_tool(
             return f"Message ID {input_data['message_id']} not found in #{src.name}."
         except ValueError:
             return "Error: Invalid message ID."
-        # Download all attachments before deleting the original
+        # Download all attachments before doing anything — abort if any fail
         files = []
         for att in msg.attachments:
             try:
                 data = await att.read()
                 files.append(discord.File(io.BytesIO(data), filename=att.filename))
-            except Exception:
-                pass  # Skip unreadable attachments, still proceed
+            except Exception as e:
+                return f"Aborted: failed to download attachment '{att.filename}' — {e}. Original message not deleted."
 
         # Build forwarded content with attribution
         header = f"**Moved from #{src.name}** (originally by **{msg.author.display_name}**):\n"
