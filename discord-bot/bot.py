@@ -948,7 +948,11 @@ async def execute_discord_tool(
             return "Nothing to edit — provide at least one of: name, topic, category."
         try:
             await channel.edit(**kwargs)
-            return f"Updated #{channel.name}: {', '.join(f'{k}={v}' for k, v in kwargs.items() if k != 'category') + (f', category={kwargs[\"category\"].name}' if 'category' in kwargs and kwargs['category'] else '')}."
+            parts = [f"{k}={v}" for k, v in kwargs.items() if k != "category"]
+            if "category" in kwargs:
+                cat_name = kwargs["category"].name if kwargs["category"] else "none"
+                parts.append(f"category={cat_name}")
+            return f"Updated #{channel.name}: {', '.join(parts)}."
         except discord.Forbidden:
             return "Error: Bot needs Manage Channels permission."
         except Exception as e:
