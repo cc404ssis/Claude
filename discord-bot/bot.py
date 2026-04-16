@@ -1213,21 +1213,26 @@ async def execute_discord_tool(
             return f"Message ID {input_data['message_id']} not found in #{src.name}."
         except ValueError:
             return "Error: Invalid message ID."
+        # Download all attachments before deleting the original
+        files = []
+        for att in msg.attachments:
+            try:
+                data = await att.read()
+                files.append(discord.File(io.BytesIO(data), filename=att.filename))
+            except Exception:
+                pass  # Skip unreadable attachments, still proceed
+
         # Build forwarded content with attribution
-        jump_url = msg.jump_url
         header = f"**Moved from #{src.name}** (originally by **{msg.author.display_name}**):\n"
         body = msg.content or "(no text)"
         forwarded = header + body
         if len(forwarded) > 2000:
             forwarded = forwarded[:1997] + "…"
         try:
-            await dst.send(forwarded)
-            # Re-send any attachments as URLs (Discord CDN links)
-            if msg.attachments:
-                att_links = "\n".join(a.url for a in msg.attachments)
-                await dst.send(f"**Attachments from moved message:**\n{att_links}")
+            await dst.send(content=forwarded, files=files if files else discord.utils.MISSING)
             await msg.delete()
-            return f"Moved message from #{src.name} to #{dst.name} (copy + delete)."
+            att_note = f" ({len(files)} attachment(s) re-uploaded)" if files else ""
+            return f"Moved message from #{src.name} to #{dst.name}{att_note}."
         except discord.Forbidden:
             return "Error: Bot needs Send Messages permission in destination and Manage Messages in source."
         except Exception as e:
