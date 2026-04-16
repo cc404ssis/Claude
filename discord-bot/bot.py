@@ -85,16 +85,30 @@ You have two sets of tools available:
 
 **Discord server tools:**
 - **list_channels** — List all channels in the Studio404 server
-- **read_channel** — Read recent messages from any channel by name or ID
+- **read_channel** — Read recent messages from any channel (includes message IDs)
 - **list_members** — List server members with their roles
-- **pin_message** — Pin a message (use `last_bot` to pin your own last message, or pass a message ID from read_channel)
-- **create_thread** — Create a public thread in the current channel or any specified channel
-- **create_category** — Create a new category in the server
+- **get_message_by_id** — Fetch full details of a message by ID
+- **search_messages** — Search messages in a channel by content or author
+- **pin_message** — Pin a message (`last_bot` = pin your own last message)
+- **unpin_message** — Unpin a message
+- **add_reaction** — React to a message with an emoji
+- **delete_message** — Delete any message by ID
+- **edit_message** — Edit one of CB404's own messages
+- **send_to_channel** — Send a message to any channel
+- **create_category** — Create a new category
 - **create_channel** — Create a new text channel, optionally inside a category
+- **edit_channel** — Rename, set topic, or move a channel to a different category
+- **delete_channel** — Delete a channel
+- **edit_category** — Rename a category
+- **delete_category** — Delete a category (channels inside become uncategorized)
+- **create_thread** — Create a public thread in any channel
+- **archive_thread** — Archive (close) a thread without deleting it
 - **move_thread** — Move a thread to a different channel
 - **delete_thread** — Delete a thread permanently
-- **send_to_channel** — Send a message to a different channel
+- **create_role** — Create a new server role
+- **delete_role** — Delete a role
 - **manage_role** — Add or remove a role from a member
+- **set_channel_permissions** — Set permission overrides for a role or member in a channel
 
 When asked about a project, channel, or member you don't have context on — use your tools to look it up. The vault is the shared source of truth. Discord tools let you act on the server directly."""
 
@@ -466,6 +480,187 @@ DISCORD_TOOLS = [
             "required": ["member", "role", "action"],
         },
     },
+    {
+        "name": "edit_channel",
+        "description": "Rename a channel, change its topic, or move it to a different category.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "channel": {"type": "string", "description": "Channel name or ID to edit."},
+                "name": {"type": "string", "description": "New name for the channel."},
+                "topic": {"type": "string", "description": "New topic/description for the channel."},
+                "category": {"type": "string", "description": "Category name or ID to move the channel into. Use '' to remove from category."},
+            },
+            "required": ["channel"],
+        },
+    },
+    {
+        "name": "edit_category",
+        "description": "Rename a category.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "category": {"type": "string", "description": "Category name or ID to rename."},
+                "name": {"type": "string", "description": "New name for the category."},
+            },
+            "required": ["category", "name"],
+        },
+    },
+    {
+        "name": "delete_channel",
+        "description": "Permanently delete a text channel.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "channel": {"type": "string", "description": "Channel name or ID to delete."},
+            },
+            "required": ["channel"],
+        },
+    },
+    {
+        "name": "delete_category",
+        "description": "Permanently delete a category (does not delete channels inside it).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "category": {"type": "string", "description": "Category name or ID to delete."},
+            },
+            "required": ["category"],
+        },
+    },
+    {
+        "name": "archive_thread",
+        "description": "Archive (close) a thread without deleting it.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "thread": {"type": "string", "description": "Thread name or ID to archive."},
+            },
+            "required": ["thread"],
+        },
+    },
+    {
+        "name": "unpin_message",
+        "description": "Unpin a message in the current channel.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_id": {"type": "string", "description": "Message ID to unpin."},
+            },
+            "required": ["message_id"],
+        },
+    },
+    {
+        "name": "get_message_by_id",
+        "description": "Fetch a specific message by ID. Defaults to current channel; optionally specify another.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_id": {"type": "string", "description": "The message ID to fetch."},
+                "channel": {"type": "string", "description": "Optional: channel name or ID. Defaults to current channel."},
+            },
+            "required": ["message_id"],
+        },
+    },
+    {
+        "name": "delete_message",
+        "description": "Delete a message by ID. Defaults to current channel; optionally specify another.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_id": {"type": "string", "description": "The message ID to delete."},
+                "channel": {"type": "string", "description": "Optional: channel name or ID. Defaults to current channel."},
+            },
+            "required": ["message_id"],
+        },
+    },
+    {
+        "name": "edit_message",
+        "description": "Edit one of CB404's own messages (cannot edit other users' messages).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_id": {"type": "string", "description": "The CB404 message ID to edit."},
+                "content": {"type": "string", "description": "New content for the message."},
+                "channel": {"type": "string", "description": "Optional: channel name or ID. Defaults to current channel."},
+            },
+            "required": ["message_id", "content"],
+        },
+    },
+    {
+        "name": "add_reaction",
+        "description": "Add an emoji reaction to a message.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_id": {"type": "string", "description": "The message ID to react to."},
+                "emoji": {"type": "string", "description": "Emoji to react with, e.g. '✅', '👍', '🔥'."},
+                "channel": {"type": "string", "description": "Optional: channel name or ID. Defaults to current channel."},
+            },
+            "required": ["message_id", "emoji"],
+        },
+    },
+    {
+        "name": "search_messages",
+        "description": "Search recent messages in a channel by content or author name.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "channel": {"type": "string", "description": "Channel name or ID to search."},
+                "query": {"type": "string", "description": "Optional: text to search for in message content."},
+                "author": {"type": "string", "description": "Optional: filter by author display name or username."},
+                "limit": {"type": "integer", "description": "How many messages to scan (default 100, max 500)."},
+            },
+            "required": ["channel"],
+        },
+    },
+    {
+        "name": "create_role",
+        "description": "Create a new role in the server.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Name of the role."},
+                "color": {"type": "string", "description": "Optional: hex color code e.g. '#ff4500'."},
+                "mentionable": {"type": "boolean", "description": "Whether the role can be @mentioned. Default false."},
+                "hoist": {"type": "boolean", "description": "Whether to display the role separately in the member list. Default false."},
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "delete_role",
+        "description": "Permanently delete a role from the server.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "role": {"type": "string", "description": "Role name or ID to delete."},
+            },
+            "required": ["role"],
+        },
+    },
+    {
+        "name": "set_channel_permissions",
+        "description": "Set permission overrides for a role or member in a channel. Use allow/deny lists of permission names.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "channel": {"type": "string", "description": "Channel name or ID."},
+                "target": {"type": "string", "description": "Role name/ID or member name/ID to set permissions for."},
+                "allow": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Permission names to allow, e.g. ['view_channel', 'send_messages'].",
+                },
+                "deny": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Permission names to deny, e.g. ['send_messages', 'add_reactions'].",
+                },
+            },
+            "required": ["channel", "target"],
+        },
+    },
 ]
 
 DISCORD_TOOL_NAMES = {t["name"] for t in DISCORD_TOOLS}
@@ -707,6 +902,284 @@ async def execute_discord_tool(
                 return f"Removed role '{role.name}' from {member.display_name}."
         except discord.Forbidden:
             return "Error: Bot needs Manage Roles permission, or the role is above the bot's highest role."
+
+    # ── edit_channel ──
+    if name == "edit_channel":
+        channel = _find_channel(guild, input_data["channel"])
+        if not channel:
+            return f"Channel '{input_data['channel']}' not found."
+        kwargs: dict = {}
+        if input_data.get("name"):
+            kwargs["name"] = input_data["name"]
+        if "topic" in input_data:
+            kwargs["topic"] = input_data["topic"]
+        if "category" in input_data:
+            cat_val = input_data["category"]
+            if cat_val == "":
+                kwargs["category"] = None
+            else:
+                cat = discord.utils.find(
+                    lambda c: isinstance(c, discord.CategoryChannel) and
+                    (c.name.lower() == cat_val.lower() or str(c.id) == cat_val),
+                    guild.channels,
+                )
+                if not cat:
+                    return f"Category '{cat_val}' not found."
+                kwargs["category"] = cat
+        if not kwargs:
+            return "Nothing to edit — provide at least one of: name, topic, category."
+        try:
+            await channel.edit(**kwargs)
+            return f"Updated #{channel.name}: {', '.join(f'{k}={v}' for k, v in kwargs.items() if k != 'category') + (f', category={kwargs[\"category\"].name}' if 'category' in kwargs and kwargs['category'] else '')}."
+        except discord.Forbidden:
+            return "Error: Bot needs Manage Channels permission."
+        except Exception as e:
+            return f"Error editing channel: {e}"
+
+    # ── edit_category ──
+    if name == "edit_category":
+        cat = discord.utils.find(
+            lambda c: isinstance(c, discord.CategoryChannel) and
+            (c.name.lower() == input_data["category"].lower() or str(c.id) == input_data["category"]),
+            guild.channels,
+        )
+        if not cat:
+            return f"Category '{input_data['category']}' not found."
+        try:
+            await cat.edit(name=input_data["name"])
+            return f"Renamed category to '{input_data['name']}'."
+        except discord.Forbidden:
+            return "Error: Bot needs Manage Channels permission."
+        except Exception as e:
+            return f"Error editing category: {e}"
+
+    # ── delete_channel ──
+    if name == "delete_channel":
+        channel = _find_channel(guild, input_data["channel"])
+        if not channel:
+            return f"Channel '{input_data['channel']}' not found."
+        name_backup = channel.name
+        try:
+            await channel.delete()
+            return f"Deleted #{name_backup}."
+        except discord.Forbidden:
+            return "Error: Bot needs Manage Channels permission."
+        except Exception as e:
+            return f"Error deleting channel: {e}"
+
+    # ── delete_category ──
+    if name == "delete_category":
+        cat = discord.utils.find(
+            lambda c: isinstance(c, discord.CategoryChannel) and
+            (c.name.lower() == input_data["category"].lower() or str(c.id) == input_data["category"]),
+            guild.channels,
+        )
+        if not cat:
+            return f"Category '{input_data['category']}' not found."
+        name_backup = cat.name
+        try:
+            await cat.delete()
+            return f"Deleted category '{name_backup}'. Channels inside it are now uncategorized."
+        except discord.Forbidden:
+            return "Error: Bot needs Manage Channels permission."
+        except Exception as e:
+            return f"Error deleting category: {e}"
+
+    # ── archive_thread ──
+    if name == "archive_thread":
+        thread = _find_thread(guild, input_data["thread"])
+        if not thread:
+            return f"Thread '{input_data['thread']}' not found (only active threads are searchable by name)."
+        try:
+            await thread.edit(archived=True)
+            return f"Archived thread '{thread.name}'."
+        except discord.Forbidden:
+            return "Error: Bot needs Manage Threads permission."
+        except Exception as e:
+            return f"Error archiving thread: {e}"
+
+    # ── unpin_message ──
+    if name == "unpin_message":
+        try:
+            msg = await ctx_message.channel.fetch_message(int(input_data["message_id"]))
+            await msg.unpin()
+            preview = (msg.content[:80] + "…") if len(msg.content) > 80 else msg.content
+            return f"Unpinned message from {msg.author.display_name}: {preview}"
+        except discord.NotFound:
+            return f"Message ID {input_data['message_id']} not found in this channel."
+        except discord.Forbidden:
+            return "Error: Bot needs Manage Messages permission to unpin."
+        except ValueError:
+            return "Error: Invalid message ID."
+
+    # ── get_message_by_id ──
+    if name == "get_message_by_id":
+        target_ch = _find_channel(guild, input_data["channel"]) if input_data.get("channel") else ctx_message.channel
+        if not target_ch:
+            return f"Channel '{input_data['channel']}' not found."
+        try:
+            msg = await target_ch.fetch_message(int(input_data["message_id"]))
+            ts = msg.created_at.strftime("%Y-%m-%d %H:%M")
+            attachments = f" [+{len(msg.attachments)} file(s)]" if msg.attachments else ""
+            reactions = " ".join(f"{r.emoji}×{r.count}" for r in msg.reactions) if msg.reactions else ""
+            return (
+                f"Message ID: {msg.id}\n"
+                f"Author: {msg.author.display_name} ({msg.author.name})\n"
+                f"Channel: #{target_ch.name}\n"
+                f"Time: {ts}\n"
+                f"Content: {msg.content or '(no text)'}{attachments}\n"
+                f"Reactions: {reactions or 'none'}\n"
+                f"Pinned: {msg.pinned}"
+            )
+        except discord.NotFound:
+            return f"Message ID {input_data['message_id']} not found."
+        except ValueError:
+            return "Error: Invalid message ID."
+
+    # ── delete_message ──
+    if name == "delete_message":
+        target_ch = _find_channel(guild, input_data["channel"]) if input_data.get("channel") else ctx_message.channel
+        if not target_ch:
+            return f"Channel '{input_data['channel']}' not found."
+        try:
+            msg = await target_ch.fetch_message(int(input_data["message_id"]))
+            preview = (msg.content[:60] + "…") if len(msg.content) > 60 else msg.content
+            author = msg.author.display_name
+            await msg.delete()
+            return f"Deleted message from {author}: {preview}"
+        except discord.NotFound:
+            return f"Message ID {input_data['message_id']} not found."
+        except discord.Forbidden:
+            return "Error: Bot needs Manage Messages permission to delete others' messages."
+        except ValueError:
+            return "Error: Invalid message ID."
+
+    # ── edit_message ──
+    if name == "edit_message":
+        target_ch = _find_channel(guild, input_data["channel"]) if input_data.get("channel") else ctx_message.channel
+        if not target_ch:
+            return f"Channel '{input_data['channel']}' not found."
+        try:
+            msg = await target_ch.fetch_message(int(input_data["message_id"]))
+            if msg.author != bot_ref.user:
+                return "Error: Can only edit CB404's own messages."
+            await msg.edit(content=input_data["content"])
+            return f"Edited message {msg.id}."
+        except discord.NotFound:
+            return f"Message ID {input_data['message_id']} not found."
+        except ValueError:
+            return "Error: Invalid message ID."
+
+    # ── add_reaction ──
+    if name == "add_reaction":
+        target_ch = _find_channel(guild, input_data["channel"]) if input_data.get("channel") else ctx_message.channel
+        if not target_ch:
+            return f"Channel '{input_data['channel']}' not found."
+        try:
+            msg = await target_ch.fetch_message(int(input_data["message_id"]))
+            await msg.add_reaction(input_data["emoji"])
+            return f"Reacted {input_data['emoji']} to message from {msg.author.display_name}."
+        except discord.NotFound:
+            return f"Message ID {input_data['message_id']} not found."
+        except discord.HTTPException as e:
+            return f"Error adding reaction (invalid emoji?): {e}"
+        except ValueError:
+            return "Error: Invalid message ID."
+
+    # ── search_messages ──
+    if name == "search_messages":
+        channel = _find_channel(guild, input_data["channel"])
+        if not channel:
+            return f"Channel '{input_data['channel']}' not found."
+        scan_limit = min(int(input_data.get("limit") or 100), 500)
+        query = (input_data.get("query") or "").lower()
+        author_filter = (input_data.get("author") or "").lower()
+        matches = []
+        try:
+            async for msg in channel.history(limit=scan_limit):
+                if query and query not in msg.content.lower():
+                    continue
+                if author_filter and author_filter not in msg.author.display_name.lower() and author_filter not in msg.author.name.lower():
+                    continue
+                matches.append(msg)
+                if len(matches) >= 20:
+                    break
+        except discord.Forbidden:
+            return f"Error: Bot doesn't have permission to read #{channel.name}."
+        if not matches:
+            return f"No messages found in #{channel.name} matching your criteria."
+        matches.reverse()
+        lines = [f"Found {len(matches)} message(s) in #{channel.name}:"]
+        for msg in matches:
+            ts = msg.created_at.strftime("%Y-%m-%d %H:%M")
+            text = (msg.content[:150] + "…") if len(msg.content) > 150 else (msg.content or "(no text)")
+            lines.append(f"[{ts}] [ID:{msg.id}] {msg.author.display_name}: {text}")
+        return "\n".join(lines)
+
+    # ── create_role ──
+    if name == "create_role":
+        try:
+            color = discord.Color.default()
+            if input_data.get("color"):
+                hex_str = input_data["color"].lstrip("#")
+                color = discord.Color(int(hex_str, 16))
+            role = await guild.create_role(
+                name=input_data["name"],
+                color=color,
+                mentionable=bool(input_data.get("mentionable", False)),
+                hoist=bool(input_data.get("hoist", False)),
+            )
+            return f"Created role '{role.name}' (ID: {role.id})."
+        except discord.Forbidden:
+            return "Error: Bot needs Manage Roles permission."
+        except Exception as e:
+            return f"Error creating role: {e}"
+
+    # ── delete_role ──
+    if name == "delete_role":
+        role = _find_role(guild, input_data["role"])
+        if not role:
+            return f"Role '{input_data['role']}' not found."
+        name_backup = role.name
+        try:
+            await role.delete()
+            return f"Deleted role '{name_backup}'."
+        except discord.Forbidden:
+            return "Error: Bot needs Manage Roles permission, or the role is above the bot's highest role."
+        except Exception as e:
+            return f"Error deleting role: {e}"
+
+    # ── set_channel_permissions ──
+    if name == "set_channel_permissions":
+        channel = _find_channel(guild, input_data["channel"])
+        if not channel:
+            return f"Channel '{input_data['channel']}' not found."
+        # Find target — try role first, then member
+        target_str = input_data["target"]
+        target = _find_role(guild, target_str) or _find_member(guild, target_str)
+        if not target:
+            return f"Target '{target_str}' not found as a role or member."
+        allow_list = input_data.get("allow") or []
+        deny_list = input_data.get("deny") or []
+        overwrite = discord.PermissionOverwrite()
+        for perm in allow_list:
+            try:
+                setattr(overwrite, perm, True)
+            except AttributeError:
+                return f"Unknown permission: '{perm}'"
+        for perm in deny_list:
+            try:
+                setattr(overwrite, perm, False)
+            except AttributeError:
+                return f"Unknown permission: '{perm}'"
+        try:
+            await channel.set_permissions(target, overwrite=overwrite)
+            target_name = target.name if isinstance(target, discord.Role) else target.display_name
+            return f"Set permissions for '{target_name}' in #{channel.name}: allow={allow_list}, deny={deny_list}."
+        except discord.Forbidden:
+            return "Error: Bot needs Manage Channels permission."
+        except Exception as e:
+            return f"Error setting permissions: {e}"
 
     return f"Unknown Discord tool: {name}"
 
