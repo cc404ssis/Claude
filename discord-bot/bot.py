@@ -733,6 +733,19 @@ def _find_role(guild: discord.Guild, name_or_id: str) -> discord.Role | None:
         return discord.utils.find(lambda r: r.name.lower() == lower, guild.roles)
 
 
+async def _resolve_channel(
+    guild: discord.Guild, bot_ref: commands.Bot, name_or_id: str
+) -> discord.abc.GuildChannel | None:
+    """Find a channel by name or ID. Falls back to bot.fetch_channel() on cache miss."""
+    channel = _find_channel(guild, name_or_id)
+    if channel:
+        return channel
+    try:
+        return await bot_ref.fetch_channel(int(name_or_id))
+    except (ValueError, discord.NotFound, discord.Forbidden):
+        return None
+
+
 def _find_thread(guild: discord.Guild, name_or_id: str) -> discord.Thread | None:
     """Find an active thread by name or ID."""
     try:
@@ -768,7 +781,7 @@ async def execute_discord_tool(
 
     # ── read_channel ──
     if name == "read_channel":
-        channel = _find_channel(guild, input_data["channel"])
+        channel = await _resolve_channel(guild, bot_ref, input_data["channel"])
         if not channel:
             return f"Channel '{input_data['channel']}' not found."
         limit = min(int(input_data.get("limit") or 15), 50)
@@ -828,7 +841,7 @@ async def execute_discord_tool(
         # Optionally create in a different channel
         target_channel = ctx_message.channel
         if input_data.get("channel"):
-            found = _find_channel(guild, input_data["channel"])
+            found = await _resolve_channel(guild, bot_ref, input_data["channel"])
             if not found:
                 return f"Channel '{input_data['channel']}' not found."
             target_channel = found
@@ -880,7 +893,7 @@ async def execute_discord_tool(
         thread = _find_thread(guild, input_data["thread"])
         if not thread:
             return f"Thread '{input_data['thread']}' not found (only active threads are searchable by name)."
-        dest = _find_channel(guild, input_data["channel"])
+        dest = await _resolve_channel(guild, bot_ref, input_data["channel"])
         if not dest:
             return f"Channel '{input_data['channel']}' not found."
         try:
@@ -907,7 +920,7 @@ async def execute_discord_tool(
 
     # ── send_to_channel ──
     if name == "send_to_channel":
-        channel = _find_channel(guild, input_data["channel"])
+        channel = await _resolve_channel(guild, bot_ref, input_data["channel"])
         if not channel:
             return f"Channel '{input_data['channel']}' not found."
         content = input_data["content"][:2000]
@@ -938,7 +951,7 @@ async def execute_discord_tool(
 
     # ── edit_channel ──
     if name == "edit_channel":
-        channel = _find_channel(guild, input_data["channel"])
+        channel = await _resolve_channel(guild, bot_ref, input_data["channel"])
         if not channel:
             return f"Channel '{input_data['channel']}' not found."
         kwargs: dict = {}
@@ -992,7 +1005,7 @@ async def execute_discord_tool(
 
     # ── delete_channel ──
     if name == "delete_channel":
-        channel = _find_channel(guild, input_data["channel"])
+        channel = await _resolve_channel(guild, bot_ref, input_data["channel"])
         if not channel:
             return f"Channel '{input_data['channel']}' not found."
         name_backup = channel.name
@@ -1051,7 +1064,7 @@ async def execute_discord_tool(
 
     # ── get_message_by_id ──
     if name == "get_message_by_id":
-        target_ch = _find_channel(guild, input_data["channel"]) if input_data.get("channel") else ctx_message.channel
+        target_ch = await _resolve_channel(guild, bot_ref, input_data["channel"]) if input_data.get("channel") else ctx_message.channel
         if not target_ch:
             return f"Channel '{input_data['channel']}' not found."
         try:
@@ -1075,7 +1088,7 @@ async def execute_discord_tool(
 
     # ── delete_message ──
     if name == "delete_message":
-        target_ch = _find_channel(guild, input_data["channel"]) if input_data.get("channel") else ctx_message.channel
+        target_ch = await _resolve_channel(guild, bot_ref, input_data["channel"]) if input_data.get("channel") else ctx_message.channel
         if not target_ch:
             return f"Channel '{input_data['channel']}' not found."
         try:
@@ -1093,7 +1106,7 @@ async def execute_discord_tool(
 
     # ── edit_message ──
     if name == "edit_message":
-        target_ch = _find_channel(guild, input_data["channel"]) if input_data.get("channel") else ctx_message.channel
+        target_ch = await _resolve_channel(guild, bot_ref, input_data["channel"]) if input_data.get("channel") else ctx_message.channel
         if not target_ch:
             return f"Channel '{input_data['channel']}' not found."
         try:
@@ -1109,7 +1122,7 @@ async def execute_discord_tool(
 
     # ── add_reaction ──
     if name == "add_reaction":
-        target_ch = _find_channel(guild, input_data["channel"]) if input_data.get("channel") else ctx_message.channel
+        target_ch = await _resolve_channel(guild, bot_ref, input_data["channel"]) if input_data.get("channel") else ctx_message.channel
         if not target_ch:
             return f"Channel '{input_data['channel']}' not found."
         try:
@@ -1125,7 +1138,7 @@ async def execute_discord_tool(
 
     # ── search_messages ──
     if name == "search_messages":
-        channel = _find_channel(guild, input_data["channel"])
+        channel = await _resolve_channel(guild, bot_ref, input_data["channel"])
         if not channel:
             return f"Channel '{input_data['channel']}' not found."
         scan_limit = min(int(input_data.get("limit") or 100), 500)
@@ -1188,7 +1201,7 @@ async def execute_discord_tool(
 
     # ── set_channel_permissions ──
     if name == "set_channel_permissions":
-        channel = _find_channel(guild, input_data["channel"])
+        channel = await _resolve_channel(guild, bot_ref, input_data["channel"])
         if not channel:
             return f"Channel '{input_data['channel']}' not found."
         # Find target — try role first, then member
@@ -1240,10 +1253,10 @@ async def execute_discord_tool(
 
     # ── move_message ──
     if name == "move_message":
-        src = _find_channel(guild, input_data["from_channel"])
+        src = await _resolve_channel(guild, bot_ref, input_data["from_channel"])
         if not src:
             return f"Source channel '{input_data['from_channel']}' not found."
-        dst = _find_channel(guild, input_data["to_channel"])
+        dst = await _resolve_channel(guild, bot_ref, input_data["to_channel"])
         if not dst:
             return f"Destination channel '{input_data['to_channel']}' not found."
         try:
