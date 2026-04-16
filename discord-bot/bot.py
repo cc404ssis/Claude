@@ -769,6 +769,15 @@ async def execute_discord_tool(
 
     # ── list_channels ──
     if name == "list_channels":
+        # Fetch all active threads via API (catches uncached threads too)
+        try:
+            active_threads = await guild.active_threads()
+        except Exception:
+            active_threads = list(guild.threads)
+        threads_by_parent: dict[int, list[discord.Thread]] = {}
+        for t in active_threads:
+            threads_by_parent.setdefault(t.parent_id, []).append(t)
+
         lines = []
         seen_categories: set[str] = set()
         for ch in sorted(guild.text_channels, key=lambda c: (c.category.position if c.category else -1, c.position)):
@@ -777,6 +786,8 @@ async def execute_discord_tool(
                 lines.append(f"\n**{cat_name}**")
                 seen_categories.add(cat_name)
             lines.append(f"  #{ch.name} (ID: {ch.id})")
+            for t in sorted(threads_by_parent.get(ch.id, []), key=lambda t: t.name):
+                lines.append(f"    ↳ {t.name} (thread, ID: {t.id})")
         return "\n".join(lines).strip() or "No channels found."
 
     # ── read_channel ──
