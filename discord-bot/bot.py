@@ -85,6 +85,7 @@ You have two sets of tools available:
 
 **Discord server tools:**
 - **list_channels** — List all channels in the Studio404 server
+- **fetch_channel** — Fetch a channel by ID via API (bypasses cache, works for any ID)
 - **read_channel** — Read recent messages from any channel (includes message IDs)
 - **list_members** — List server members with their roles
 - **get_message_by_id** — Fetch full details of a message by ID
@@ -663,6 +664,20 @@ DISCORD_TOOLS = [
         },
     },
     {
+        "name": "fetch_channel",
+        "description": (
+            "Fetch a channel directly by ID via the Discord API (bypasses local cache). "
+            "Use when get/find by name fails or when you have an ID from outside this server."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "channel_id": {"type": "string", "description": "The Discord channel ID to fetch."},
+            },
+            "required": ["channel_id"],
+        },
+    },
+    {
         "name": "move_message",
         "description": (
             "Simulate moving a message to another channel: copies the content to the destination "
@@ -1202,6 +1217,26 @@ async def execute_discord_tool(
             return "Error: Bot needs Manage Channels permission."
         except Exception as e:
             return f"Error setting permissions: {e}"
+
+    # ── fetch_channel ──
+    if name == "fetch_channel":
+        try:
+            channel = await bot_ref.fetch_channel(int(input_data["channel_id"]))
+            cat = channel.category.name if hasattr(channel, "category") and channel.category else "No Category"
+            topic = getattr(channel, "topic", None) or ""
+            return (
+                f"Channel: #{channel.name} (ID: {channel.id})\n"
+                f"Type: {channel.type}\n"
+                f"Category: {cat}\n"
+                f"Topic: {topic or 'none'}\n"
+                f"NSFW: {getattr(channel, 'nsfw', False)}"
+            )
+        except discord.NotFound:
+            return f"Channel ID {input_data['channel_id']} not found."
+        except discord.Forbidden:
+            return "Error: Bot doesn't have access to that channel."
+        except ValueError:
+            return "Error: Invalid channel ID — must be a number."
 
     # ── move_message ──
     if name == "move_message":
