@@ -91,6 +91,8 @@ You have two sets of tools available:
 - **create_thread** — Create a public thread in the current channel or any specified channel
 - **create_category** — Create a new category in the server
 - **create_channel** — Create a new text channel, optionally inside a category
+- **move_thread** — Move a thread to a different channel
+- **delete_thread** — Delete a thread permanently
 - **send_to_channel** — Send a message to a different channel
 - **manage_role** — Add or remove a role from a member
 
@@ -392,6 +394,38 @@ DISCORD_TOOLS = [
         },
     },
     {
+        "name": "move_thread",
+        "description": "Move an existing thread to a different parent channel.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "thread": {
+                    "type": "string",
+                    "description": "Thread name or ID to move.",
+                },
+                "channel": {
+                    "type": "string",
+                    "description": "Destination channel name or ID.",
+                },
+            },
+            "required": ["thread", "channel"],
+        },
+    },
+    {
+        "name": "delete_thread",
+        "description": "Permanently delete a thread.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "thread": {
+                    "type": "string",
+                    "description": "Thread name or ID to delete.",
+                },
+            },
+            "required": ["thread"],
+        },
+    },
+    {
         "name": "send_to_channel",
         "description": "Send a message to a different channel in the server.",
         "input_schema": {
@@ -469,6 +503,16 @@ def _find_role(guild: discord.Guild, name_or_id: str) -> discord.Role | None:
     except ValueError:
         lower = name_or_id.lower()
         return discord.utils.find(lambda r: r.name.lower() == lower, guild.roles)
+
+
+def _find_thread(guild: discord.Guild, name_or_id: str) -> discord.Thread | None:
+    """Find an active thread by name or ID."""
+    try:
+        tid = int(name_or_id)
+        return guild.get_thread(tid)
+    except ValueError:
+        lower = name_or_id.lower()
+        return discord.utils.find(lambda t: t.name.lower() == lower, guild.threads)
 
 
 async def execute_discord_tool(
@@ -602,6 +646,36 @@ async def execute_discord_tool(
             return "Error: Bot needs Manage Channels permission to create channels."
         except Exception as e:
             return f"Error creating channel: {e}"
+
+    # ── move_thread ──
+    if name == "move_thread":
+        thread = _find_thread(guild, input_data["thread"])
+        if not thread:
+            return f"Thread '{input_data['thread']}' not found (only active threads are searchable by name)."
+        dest = _find_channel(guild, input_data["channel"])
+        if not dest:
+            return f"Channel '{input_data['channel']}' not found."
+        try:
+            await thread.edit(channel=dest)
+            return f"Moved thread '{thread.name}' to #{dest.name}."
+        except discord.Forbidden:
+            return "Error: Bot needs Manage Threads permission to move threads."
+        except Exception as e:
+            return f"Error moving thread: {e}"
+
+    # ── delete_thread ──
+    if name == "delete_thread":
+        thread = _find_thread(guild, input_data["thread"])
+        if not thread:
+            return f"Thread '{input_data['thread']}' not found (only active threads are searchable by name)."
+        name_backup = thread.name
+        try:
+            await thread.delete()
+            return f"Deleted thread '{name_backup}'."
+        except discord.Forbidden:
+            return "Error: Bot needs Manage Threads permission to delete threads."
+        except Exception as e:
+            return f"Error deleting thread: {e}"
 
     # ── send_to_channel ──
     if name == "send_to_channel":
