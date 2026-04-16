@@ -6,9 +6,10 @@ Core rules:
 - Only responds when @mentioned by a HUMAN (never triggered by other bots)
 - Reads recent channel history for context (sees Dr Mana + Kimi replies)
 - Never @mentions other bots in replies (prevents loops)
-- Uses Claude Opus 4.6 with adaptive thinking + vault tool use
+- Uses Claude Opus 4.6 with adaptive thinking + vault + Discord tool use
 """
 
+import io
 import os
 import asyncio
 import base64
@@ -20,12 +21,19 @@ from discord.ext import commands
 import anthropic
 from dotenv import load_dotenv
 
+try:
+    from pptx import Presentation as PptxPresentation
+    PPTX_AVAILABLE = True
+except ImportError:
+    PPTX_AVAILABLE = False
+
 load_dotenv()
 
 DISCORD_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 GITHUB_TOKEN = os.environ.get("TRINITYBRAIN_GITHUB_TOKEN", "")
 HISTORY_LIMIT = int(os.environ.get("HISTORY_LIMIT", "20"))
+HISTORY_IMAGE_LIMIT = int(os.environ.get("HISTORY_IMAGE_LIMIT", "5"))
 MAX_RESPONSE_LENGTH = 1900  # Discord limit is 2000; leave margin
 
 _dynamic_context: str = ""  # Loaded from Trinity Brain at startup; falls back to PROJECT_CONTEXT
@@ -69,16 +77,25 @@ Multiple instances may be working on the same projects simultaneously — you ar
 - If Chris asks about a project you don't have context on, search the vault before saying you don't know — do not fabricate status.
 
 ## Your Tools
-You can search the Trinity Brain vault directly using two tools:
+You have two sets of tools available:
+
+**Trinity Brain vault tools:**
 - **read_vault_file** — Read any file by path (e.g. '🧠 SYSTEM/PRIORITIES.md')
 - **list_vault_directory** — Browse directories to discover files (e.g. '📁 PROJECTS/active/')
 
-When asked about something you don't have full context on, search the vault first. Start by listing relevant directories, then read specific files. The vault is the shared source of truth for all AI instances."""
+**Discord server tools:**
+- **list_channels** — List all channels in the Studio404 server
+- **read_channel** — Read recent messages from any channel by name or ID
+- **list_members** — List server members with their roles
+- **pin_message** — Pin a message in the current channel
+- **create_thread** — Create a public thread in the current channel
+- **send_to_channel** — Send a message to a different channel
+- **manage_role** — Add or remove a role from a member
+
+When asked about a project, channel, or member you don't have context on — use your tools to look it up. The vault is the shared source of truth. Discord tools let you act on the server directly."""
 
 
 # ── Project Context (update this freely) ──────────────────────────────────────
-# Swap this block out whenever project status changes.
-# Keep SYSTEM_PROMPT untouched unless the studio structure itself changes.
 PROJECT_CONTEXT = """## Active Projects
 
 | Project | Status | Notes |
@@ -262,36 +279,396 @@ async def context_refresh_loop():
             print(f"Context refresh failed: {e}")
 
 
+# ── Discord Tools ──────────────────────────────────────────────────────────────
+
+DISCORD_TOOLS = [
+    {
+        "name": "list_channels",
+        "description": "List all text channels and categories in the Studio404 Discord server.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "read_channel",
+        "description": (
+            "Read recent messages from any channel in the server. "
+            "Use to check what's being discussed in another channel."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "channel": {
+                    "type": "string",
+                    "description": "Channel name (e.g. 'general') or channel ID.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Number of messages to fetch (default 15, max 50).",
+                },
+            },
+            "required": ["channel"],
+        },
+    },
+    {
+        "name": "list_members",
+        "description": "List all members in the Studio404 server with their display names and roles.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "pin_message",
+        "description": "Pin a message in the current channel by its message ID.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_id": {
+                    "type": "string",
+                    "description": "The Discord message ID to pin.",
+                },
+            },
+            "required": ["message_id"],
+        },
+    },
+    {
+        "name": "create_thread",
+        "description": "Create a public thread in the current channel.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name for the new thread (max 100 characters).",
+                },
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "send_to_channel",
+        "description": "Send a message to a different channel in the server.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "channel": {
+                    "type": "string",
+                    "description": "Target channel name (e.g. 'announcements') or channel ID.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The message text to send.",
+                },
+            },
+            "required": ["channel", "content"],
+        },
+    },
+    {
+        "name": "manage_role",
+        "description": "Add or remove a role from a server member.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "member": {
+                    "type": "string",
+                    "description": "Member display name or user ID.",
+                },
+                "role": {
+                    "type": "string",
+                    "description": "Role name or role ID.",
+                },
+                "action": {
+                    "type": "string",
+                    "enum": ["add", "remove"],
+                    "description": "Whether to add or remove the role.",
+                },
+            },
+            "required": ["member", "role", "action"],
+        },
+    },
+]
+
+DISCORD_TOOL_NAMES = {t["name"] for t in DISCORD_TOOLS}
+VAULT_TOOL_NAMES = {t["name"] for t in VAULT_TOOLS}
+
+
+def _find_channel(guild: discord.Guild, name_or_id: str) -> discord.TextChannel | None:
+    """Find a text channel by name or ID."""
+    try:
+        cid = int(name_or_id)
+        return guild.get_channel(cid)
+    except ValueError:
+        clean = name_or_id.lstrip("#")
+        return discord.utils.find(lambda c: c.name == clean, guild.text_channels)
+
+
+def _find_member(guild: discord.Guild, name_or_id: str) -> discord.Member | None:
+    """Find a member by display name, username, or ID."""
+    try:
+        mid = int(name_or_id)
+        return guild.get_member(mid)
+    except ValueError:
+        lower = name_or_id.lower()
+        return discord.utils.find(
+            lambda m: m.display_name.lower() == lower or m.name.lower() == lower,
+            guild.members,
+        )
+
+
+def _find_role(guild: discord.Guild, name_or_id: str) -> discord.Role | None:
+    """Find a role by name or ID."""
+    try:
+        rid = int(name_or_id)
+        return guild.get_role(rid)
+    except ValueError:
+        lower = name_or_id.lower()
+        return discord.utils.find(lambda r: r.name.lower() == lower, guild.roles)
+
+
+async def execute_discord_tool(
+    name: str,
+    input_data: dict,
+    bot_ref: commands.Bot,
+    ctx_message: discord.Message,
+) -> str:
+    """Execute a Discord server tool and return a result string."""
+    guild = ctx_message.guild
+    if not guild:
+        return "Error: Discord tools only work in a server channel, not DMs."
+
+    # ── list_channels ──
+    if name == "list_channels":
+        lines = []
+        seen_categories: set[str] = set()
+        for ch in sorted(guild.text_channels, key=lambda c: (c.category.position if c.category else -1, c.position)):
+            cat_name = ch.category.name if ch.category else "No Category"
+            if cat_name not in seen_categories:
+                lines.append(f"\n**{cat_name}**")
+                seen_categories.add(cat_name)
+            lines.append(f"  #{ch.name} (ID: {ch.id})")
+        return "\n".join(lines).strip() or "No channels found."
+
+    # ── read_channel ──
+    if name == "read_channel":
+        channel = _find_channel(guild, input_data["channel"])
+        if not channel:
+            return f"Channel '{input_data['channel']}' not found."
+        limit = min(int(input_data.get("limit") or 15), 50)
+        msgs: list[discord.Message] = []
+        try:
+            async for msg in channel.history(limit=limit):
+                msgs.append(msg)
+        except discord.Forbidden:
+            return f"Error: Bot doesn't have permission to read #{channel.name}."
+        msgs.reverse()
+        lines = [f"#{channel.name} — last {len(msgs)} messages:"]
+        for msg in msgs:
+            ts = msg.created_at.strftime("%Y-%m-%d %H:%M")
+            text = (msg.content[:200] + "…") if len(msg.content) > 200 else (msg.content or "(no text)")
+            attachment_note = f" [+{len(msg.attachments)} file(s)]" if msg.attachments else ""
+            lines.append(f"[{ts}] {msg.author.display_name}: {text}{attachment_note}")
+        return "\n".join(lines)
+
+    # ── list_members ──
+    if name == "list_members":
+        lines = [f"Members in {guild.name} ({guild.member_count} total):"]
+        for member in sorted(guild.members, key=lambda m: m.display_name.lower()):
+            bot_flag = " [BOT]" if member.bot else ""
+            roles = [r.name for r in member.roles if r.name != "@everyone"]
+            role_str = ", ".join(roles) if roles else "no roles"
+            lines.append(f"  {member.display_name} ({member.name}){bot_flag} — {role_str}")
+        return "\n".join(lines)
+
+    # ── pin_message ──
+    if name == "pin_message":
+        try:
+            msg_id = int(input_data["message_id"])
+            msg = await ctx_message.channel.fetch_message(msg_id)
+            await msg.pin()
+            preview = (msg.content[:80] + "…") if len(msg.content) > 80 else msg.content
+            return f"Pinned message from {msg.author.display_name}: {preview}"
+        except discord.NotFound:
+            return f"Message ID {input_data['message_id']} not found in this channel."
+        except discord.Forbidden:
+            return "Error: Bot needs Manage Messages permission to pin."
+        except ValueError:
+            return "Error: Invalid message ID — must be a number."
+
+    # ── create_thread ──
+    if name == "create_thread":
+        thread_name = input_data["name"][:100]
+        try:
+            thread = await ctx_message.create_thread(name=thread_name)
+            return f"Created thread '{thread.name}' (ID: {thread.id}) in #{ctx_message.channel.name}."
+        except discord.Forbidden:
+            return "Error: Bot needs Create Public Threads permission."
+        except Exception as e:
+            return f"Error creating thread: {e}"
+
+    # ── send_to_channel ──
+    if name == "send_to_channel":
+        channel = _find_channel(guild, input_data["channel"])
+        if not channel:
+            return f"Channel '{input_data['channel']}' not found."
+        content = input_data["content"][:2000]
+        try:
+            await channel.send(content)
+            return f"Sent to #{channel.name}."
+        except discord.Forbidden:
+            return f"Error: Bot doesn't have permission to send messages in #{channel.name}."
+
+    # ── manage_role ──
+    if name == "manage_role":
+        member = _find_member(guild, input_data["member"])
+        if not member:
+            return f"Member '{input_data['member']}' not found."
+        role = _find_role(guild, input_data["role"])
+        if not role:
+            return f"Role '{input_data['role']}' not found."
+        action = input_data["action"]
+        try:
+            if action == "add":
+                await member.add_roles(role)
+                return f"Added role '{role.name}' to {member.display_name}."
+            else:
+                await member.remove_roles(role)
+                return f"Removed role '{role.name}' from {member.display_name}."
+        except discord.Forbidden:
+            return "Error: Bot needs Manage Roles permission, or the role is above the bot's highest role."
+
+    return f"Unknown Discord tool: {name}"
+
+
+# ── Attachment Handling ────────────────────────────────────────────────────────
+
 IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
-MAX_IMAGE_SIZE = 20 * 1024 * 1024  # 20 MB
+PPTX_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+PDF_TYPE = "application/pdf"
+
+TEXT_MIME_PREFIXES = ("text/",)
+TEXT_MIME_TYPES = {
+    "application/json",
+    "application/xml",
+    "application/x-yaml",
+    "application/yaml",
+    "application/toml",
+    "application/javascript",
+    "application/typescript",
+}
+
+CODE_EXTENSIONS = {
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".go", ".rs", ".c", ".cpp",
+    ".h", ".hpp", ".cs", ".rb", ".php", ".swift", ".kt", ".scala", ".r",
+    ".sh", ".bash", ".zsh", ".fish", ".ps1",
+    ".md", ".txt", ".rst", ".csv", ".tsv",
+    ".json", ".yaml", ".yml", ".toml", ".ini", ".env", ".cfg", ".conf",
+    ".html", ".htm", ".css", ".scss", ".sass", ".less",
+    ".sql", ".graphql", ".proto", ".xml",
+    ".dockerfile", ".makefile",
+}
+
+MAX_ATTACHMENT_SIZE = 20 * 1024 * 1024  # 20 MB
+MAX_TEXT_FILE_SIZE = 20_000  # chars — truncate long text files
 
 
-async def download_image(attachment: discord.Attachment) -> dict | None:
-    """Download a Discord image attachment and return a Claude image content block."""
-    content_type = (attachment.content_type or "").split(";")[0]
-    if content_type not in IMAGE_TYPES:
+def _is_text_attachment(attachment: discord.Attachment) -> bool:
+    """Return True if this attachment should be read as text."""
+    ct = (attachment.content_type or "").split(";")[0].strip()
+    if any(ct.startswith(p) for p in TEXT_MIME_PREFIXES):
+        return True
+    if ct in TEXT_MIME_TYPES:
+        return True
+    _, ext = os.path.splitext(attachment.filename.lower())
+    return ext in CODE_EXTENSIONS
+
+
+def extract_pptx_text(data: bytes) -> str:
+    """Extract text from a PowerPoint file, formatted by slide."""
+    if not PPTX_AVAILABLE:
+        return "[PowerPoint file — install python-pptx to extract text]"
+    try:
+        prs = PptxPresentation(io.BytesIO(data))
+        slides_text = []
+        for i, slide in enumerate(prs.slides, 1):
+            texts = []
+            for shape in slide.shapes:
+                if hasattr(shape, "text") and shape.text.strip():
+                    texts.append(shape.text.strip())
+            if texts:
+                slides_text.append(f"[Slide {i}]:\n" + "\n".join(texts))
+        result = "\n\n".join(slides_text)
+        if len(result) > MAX_TEXT_FILE_SIZE:
+            result = result[:MAX_TEXT_FILE_SIZE] + f"\n\n[Truncated at {MAX_TEXT_FILE_SIZE} chars]"
+        return result or "[Presentation has no readable text]"
+    except Exception as e:
+        return f"[Error extracting PowerPoint text: {e}]"
+
+
+async def download_attachment(attachment: discord.Attachment) -> dict | None:
+    """
+    Download a Discord attachment and return a Claude content block, or None if unsupported.
+    Handles: images, PDFs, text/code files, CSV, PPTX.
+    """
+    if attachment.size > MAX_ATTACHMENT_SIZE:
         return None
-    if attachment.size > MAX_IMAGE_SIZE:
-        return None
+
+    ct = (attachment.content_type or "").split(";")[0].strip()
+    filename = attachment.filename
+
     try:
         data = await attachment.read()
+    except Exception:
+        return None
+
+    # ── Images ──
+    if ct in IMAGE_TYPES:
         return {
             "type": "image",
             "source": {
                 "type": "base64",
-                "media_type": content_type,
+                "media_type": ct,
                 "data": base64.b64encode(data).decode("utf-8"),
             },
         }
-    except Exception:
-        return None
+
+    # ── PDFs (Claude native document support) ──
+    if ct == PDF_TYPE or filename.lower().endswith(".pdf"):
+        return {
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": base64.b64encode(data).decode("utf-8"),
+            },
+        }
+
+    # ── PowerPoint ──
+    if ct == PPTX_TYPE or filename.lower().endswith(".pptx"):
+        text = extract_pptx_text(data)
+        return {"type": "text", "text": f"[File: {filename}]\n\n{text}"}
+
+    # ── Text / code / CSV / markdown ──
+    if _is_text_attachment(attachment):
+        try:
+            text = data.decode("utf-8", errors="replace")
+        except Exception:
+            return None
+        if len(text) > MAX_TEXT_FILE_SIZE:
+            text = text[:MAX_TEXT_FILE_SIZE] + f"\n\n[Truncated at {MAX_TEXT_FILE_SIZE} chars]"
+        return {"type": "text", "text": f"[File: {filename}]\n\n{text}"}
+
+    return None  # Unsupported type
 
 
 def _merge_content(existing, new_content):
     """Merge two content values, handling both string and list-of-blocks formats."""
     if isinstance(existing, str) and isinstance(new_content, str):
         return existing + "\n" + new_content
-    # At least one side has image blocks — normalize both to lists
+    # At least one side has image/document blocks — normalize both to lists
     if isinstance(existing, str):
         existing = [{"type": "text", "text": existing}]
     if isinstance(new_content, str):
@@ -304,45 +681,72 @@ async def build_conversation(message: discord.Message, history: list[discord.Mes
     Build a Claude conversation from Discord channel history.
     History is oldest-first (already reversed from Discord's newest-first fetch).
     The triggering message is appended at the end as the final user turn.
-    Supports image attachments via Claude's vision API.
+    Supports image/document/text attachments for:
+      - The trigger message (always downloaded)
+      - The last HISTORY_IMAGE_LIMIT messages in history (downloaded for visual/doc context)
+      - Older history messages (noted as text, not downloaded to keep request size small)
     """
+    # Pre-download attachments for the last N history messages
+    attachment_window = set()
+    attachment_cache: dict[int, list[dict]] = {}
+    if HISTORY_IMAGE_LIMIT > 0:
+        recent = history[-HISTORY_IMAGE_LIMIT:]
+        for msg in recent:
+            if msg.attachments:
+                attachment_window.add(msg.id)
+                blocks = []
+                for att in msg.attachments:
+                    block = await download_attachment(att)
+                    if block:
+                        blocks.append(block)
+                if blocks:
+                    attachment_cache[msg.id] = blocks
+
     messages = []
 
     for msg in history:
         if msg.id == message.id:
-            continue  # Skip the trigger message — we'll add it at the end
-
-        # Note image attachments in history but don't download them
-        # (downloading base64 images from 20 messages blows up request size → 413)
-        has_images = any(
-            (att.content_type or "").split(";")[0] in IMAGE_TYPES for att in msg.attachments
-        )
+            continue  # Skip the trigger message — added at the end
 
         text = msg.content.strip()
-        if not text and not has_images:
-            continue
 
-        # Label bot messages by name so Claude knows who said what
-        if msg.author.bot:
-            text = f"[{msg.author.display_name}] {text}" if text else f"[{msg.author.display_name}] (shared an image)"
-        elif not text:
-            text = "(shared an image)"
+        # For messages inside the attachment window, use downloaded blocks
+        if msg.id in attachment_window and msg.id in attachment_cache:
+            blocks = attachment_cache[msg.id]
+            if text:
+                prefix = f"[{msg.author.display_name}] {text}" if msg.author.bot else text
+                content = [{"type": "text", "text": prefix}] + blocks
+            else:
+                label = f"[{msg.author.display_name}] " if msg.author.bot else ""
+                content = [{"type": "text", "text": f"{label}(shared files)"}] + blocks
+        else:
+            # For older messages, note attachments as text only
+            has_attachments = bool(msg.attachments)
+            if not text and not has_attachments:
+                continue
 
-        # Alternate user/assistant roles: human messages → user, bots → assistant
-        # This keeps Claude's conversation format valid
+            if msg.author.bot:
+                if text:
+                    text = f"[{msg.author.display_name}] {text}"
+                if has_attachments and not text:
+                    text = f"[{msg.author.display_name}] (shared files)"
+                elif has_attachments:
+                    text += " (+ files)"
+            elif not text:
+                text = "(shared files)"
+            elif has_attachments:
+                text += " (+ files)"
+
+            content = text
+
         role = "assistant" if msg.author.bot else "user"
 
-        # History messages are text-only (images noted but not downloaded)
-        content = text
-
-        # Merge consecutive same-role messages
         if messages and messages[-1]["role"] == role:
             messages[-1]["content"] = _merge_content(messages[-1]["content"], content)
         else:
             messages.append({"role": role, "content": content})
 
     # Append the triggering message as the final user turn
-    # Strip the @mention from the start of the message
     clean_content = message.content
     for mention in message.mentions:
         clean_content = clean_content.replace(f"<@{mention.id}>", "").replace(
@@ -350,19 +754,22 @@ async def build_conversation(message: discord.Message, history: list[discord.Mes
         )
     clean_content = clean_content.strip()
 
-    # Download images from the triggering message
-    trigger_images = []
+    # Download all attachments from the triggering message
+    trigger_blocks = []
     for att in message.attachments:
-        block = await download_image(att)
+        block = await download_attachment(att)
         if block:
-            trigger_images.append(block)
+            trigger_blocks.append(block)
 
-    if not clean_content and not trigger_images:
+    if not clean_content and not trigger_blocks:
         clean_content = "(pinged with no additional text)"
     elif not clean_content:
-        clean_content = "(shared an image)"
+        clean_content = "(shared files)"
 
-    trigger_content = trigger_images + [{"type": "text", "text": clean_content}] if trigger_images else clean_content
+    if trigger_blocks:
+        trigger_content = [{"type": "text", "text": clean_content}] + trigger_blocks
+    else:
+        trigger_content = clean_content
 
     if messages and messages[-1]["role"] == "user":
         messages[-1]["content"] = _merge_content(messages[-1]["content"], trigger_content)
@@ -389,7 +796,8 @@ async def classify_message_tier(text: str) -> str:
                     "SIMPLE: greetings, status checks, quick questions, acknowledgments, thank yous, "
                     "short follow-ups, yes/no answers, casual chat.\n"
                     "COMPLEX: architecture questions, code review, multi-step planning, tool use needed, "
-                    "project analysis, debugging, system design, vault lookups, anything requiring deep reasoning."
+                    "project analysis, debugging, system design, vault lookups, anything requiring deep reasoning, "
+                    "anything involving Discord server actions (pinning, threading, reading channels, managing roles)."
                 ),
                 messages=[{"role": "user", "content": text}],
             ),
@@ -417,15 +825,29 @@ async def get_simple_response(messages: list[dict]) -> str:
     return "".join(block.text for block in response.content if hasattr(block, "text"))
 
 
-async def get_claude_response(messages: list[dict]) -> str:
-    """Call Claude with vault tool use. Uses Opus 4.6 with Sonnet 4.6 fallback on overload."""
+async def get_claude_response(
+    messages: list[dict],
+    bot_ref: commands.Bot | None = None,
+    ctx_message: discord.Message | None = None,
+) -> str:
+    """
+    Call Claude with vault + Discord tool use.
+    Uses Opus 4.6 with Sonnet 4.6 fallback on overload.
+    bot_ref and ctx_message are required for Discord tools to work.
+    """
     client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
     models = ["claude-opus-4-6", "claude-sonnet-4-6"]
     system = (
         f"{SYSTEM_PROMPT}\n\n{PROJECT_CONTEXT}"
         + (f"\n\n## Live Priorities\n{_dynamic_context}" if _dynamic_context else "")
     )
-    tools = VAULT_TOOLS if GITHUB_TOKEN else []
+
+    # Merge vault tools + Discord tools
+    tools = []
+    if GITHUB_TOKEN:
+        tools.extend(VAULT_TOOLS)
+    if bot_ref and ctx_message:
+        tools.extend(DISCORD_TOOLS)
 
     for model in models:
         delay = 2
@@ -434,8 +856,8 @@ async def get_claude_response(messages: list[dict]) -> str:
             try:
                 loop_messages = list(messages)
 
-                for _ in range(4):  # Max 4 tool rounds
-                    kwargs = dict(
+                for _ in range(8):  # Max 8 tool rounds (increased for multi-tool workflows)
+                    kwargs: dict = dict(
                         model=model,
                         max_tokens=4096,
                         thinking={"type": "adaptive"},
@@ -448,21 +870,26 @@ async def get_claude_response(messages: list[dict]) -> str:
                     response = await client.messages.create(**kwargs)
 
                     if response.stop_reason != "tool_use":
-                        # Extract text blocks from final response
                         return "".join(
                             block.text for block in response.content if hasattr(block, "text")
                         )
 
-                    # Execute any tool calls
+                    # Execute tool calls
                     tool_results = []
                     for block in response.content:
                         if block.type == "tool_use":
-                            result = await execute_vault_tool(block.name, block.input)
+                            if block.name in VAULT_TOOL_NAMES:
+                                result = await execute_vault_tool(block.name, block.input)
+                            elif block.name in DISCORD_TOOL_NAMES and bot_ref and ctx_message:
+                                result = await execute_discord_tool(
+                                    block.name, block.input, bot_ref, ctx_message
+                                )
+                            else:
+                                result = f"Tool '{block.name}' not available in this context."
                             tool_results.append(
                                 {"type": "tool_result", "tool_use_id": block.id, "content": result}
                             )
 
-                    # Feed tool results back for the next round
                     loop_messages.append({"role": "assistant", "content": response.content})
                     loop_messages.append({"role": "user", "content": tool_results})
 
@@ -494,18 +921,14 @@ def split_response(text: str, limit: int = MAX_RESPONSE_LENGTH) -> list[str]:
             chunks.append(text)
             break
 
-        # Try to split at a paragraph
         split_at = text.rfind("\n\n", 0, limit)
         if split_at == -1:
-            # Try newline
             split_at = text.rfind("\n", 0, limit)
         if split_at == -1:
-            # Try sentence boundary
             split_at = text.rfind(". ", 0, limit)
             if split_at != -1:
-                split_at += 1  # Include the period
+                split_at += 1
         if split_at == -1:
-            # Hard split
             split_at = limit
 
         chunks.append(text[:split_at].strip())
@@ -517,8 +940,8 @@ def split_response(text: str, limit: int = MAX_RESPONSE_LENGTH) -> list[str]:
 # ── Bot setup ──────────────────────────────────────────────────────────────────
 
 intents = discord.Intents.default()
-intents.message_content = True
-intents.messages = True
+intents.message_content = True   # Privileged — must be enabled in Discord Developer Portal
+intents.members = True           # Privileged — must be enabled in Discord Developer Portal
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -528,6 +951,7 @@ async def on_ready():
     global _dynamic_context
     print(f"Claude bot online as {bot.user} (ID: {bot.user.id})")
     print(f"Connected to {len(bot.guilds)} server(s)")
+    print(f"python-pptx available: {PPTX_AVAILABLE}")
     try:
         _dynamic_context = await fetch_priorities()
         if _dynamic_context:
@@ -559,31 +983,34 @@ async def on_message(message: discord.Message):
             # history() returns newest-first — reverse to chronological order
             history = list(reversed(raw_history))
 
-            # Build Claude conversation (async to support image downloads)
+            # Build Claude conversation (async to support attachment downloads)
             messages = await build_conversation(message, history)
 
-            # Classify message tier: simple → Haiku, complex → Opus
-            has_images = any(
-                (att.content_type or "").split(";")[0] in IMAGE_TYPES
-                for att in message.attachments
-            )
-            tier = "complex" if has_images else await classify_message_tier(message.content)
+            # Force complex tier if any attachments are present in the trigger message
+            has_attachments = bool(message.attachments)
+            tier = "complex" if has_attachments else await classify_message_tier(message.content)
 
-            # Get response from appropriate model tier
             try:
                 if tier == "simple":
-                    response_text = await asyncio.wait_for(get_simple_response(messages), timeout=30)
+                    response_text = await asyncio.wait_for(
+                        get_simple_response(messages), timeout=30
+                    )
                 else:
-                    response_text = await asyncio.wait_for(get_claude_response(messages), timeout=120)
+                    response_text = await asyncio.wait_for(
+                        get_claude_response(messages, bot_ref=bot, ctx_message=message),
+                        timeout=120,
+                    )
             except asyncio.TimeoutError:
                 await message.reply("Timed out thinking about that — try again.", mention_author=False)
                 return
 
             if not response_text.strip():
-                await message.reply("(I processed that but had nothing to say — try rephrasing.)", mention_author=False)
+                await message.reply(
+                    "(I processed that but had nothing to say — try rephrasing.)",
+                    mention_author=False,
+                )
                 return
 
-            # Send (split if needed)
             chunks = split_response(response_text)
             for chunk in chunks:
                 await message.reply(chunk, mention_author=False)
@@ -594,16 +1021,10 @@ async def on_message(message: discord.Message):
                 mention_author=False,
             )
         except anthropic.APIError as e:
-            await message.reply(
-                f"API error: {str(e)}",
-                mention_author=False,
-            )
+            await message.reply(f"API error: {str(e)}", mention_author=False)
         except Exception as e:
             print(f"Unexpected error: {e}")
-            await message.reply(
-                "Something went wrong on my end. Try again.",
-                mention_author=False,
-            )
+            await message.reply("Something went wrong on my end. Try again.", mention_author=False)
 
     await bot.process_commands(message)
 
