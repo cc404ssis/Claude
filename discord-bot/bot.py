@@ -1759,7 +1759,7 @@ async def on_message(message: discord.Message):
                 else:
                     response_text = await asyncio.wait_for(
                         get_claude_response(messages, bot_ref=bot, ctx_message=message),
-                        timeout=120,
+                        timeout=300,
                     )
             except asyncio.TimeoutError:
                 await message.reply("Timed out thinking about that — try again.", mention_author=False)
