@@ -1620,8 +1620,8 @@ async def get_claude_response(
                 for _ in range(8):  # Max 8 tool rounds (increased for multi-tool workflows)
                     kwargs: dict = dict(
                         model=model,
-                        max_tokens=4096,
-                        thinking={"type": "adaptive"},
+                        max_tokens=6000,
+                        thinking={"type": "enabled", "budget_tokens": 8000},
                         system=system,
                         messages=loop_messages,
                     )
