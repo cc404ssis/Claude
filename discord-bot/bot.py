@@ -6,7 +6,7 @@ Core rules:
 - Only responds when @mentioned by a HUMAN (never triggered by other bots)
 - Reads recent channel history for context (sees Dr Mana + Kimi replies)
 - Never @mentions other bots in replies (prevents loops)
-- Uses Claude Opus 4.6 with adaptive thinking + vault + Discord tool use
+- Uses 3-tier model routing: Haiku (simple) → Sonnet (standard/Discord ops) → Sonnet+thinking (vault work)
 """
 
 import io
@@ -1545,7 +1545,7 @@ async def build_conversation(message: discord.Message, history: list[discord.Mes
 
 
 async def classify_message_tier(text: str) -> str:
-    """Classify a message as SIMPLE or COMPLEX using Haiku. Returns 'simple' or 'complex'."""
+    """Classify a message as SIMPLE, STANDARD, or VAULT using Haiku. Returns one of those strings."""
     client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
     try:
         response = await asyncio.wait_for(
@@ -1553,21 +1553,27 @@ async def classify_message_tier(text: str) -> str:
                 model="claude-haiku-4-5-20251001",
                 max_tokens=32,
                 system=(
-                    "Classify the user's message as SIMPLE or COMPLEX. Respond with one word only.\n"
-                    "SIMPLE: greetings, status checks, quick questions, acknowledgments, thank yous, "
-                    "short follow-ups, yes/no answers, casual chat.\n"
-                    "COMPLEX: architecture questions, code review, multi-step planning, tool use needed, "
-                    "project analysis, debugging, system design, vault lookups, anything requiring deep reasoning, "
-                    "anything involving Discord server actions (pinning, threading, reading channels, managing roles)."
+                    "Classify the user's message as SIMPLE, STANDARD, or VAULT. Respond with one word only.\n\n"
+                    "SIMPLE: greetings, thank yous, casual chat, quick yes/no, short acknowledgments.\n\n"
+                    "STANDARD: general questions, Discord server actions (create channel, add thread, pin message, "
+                    "manage roles, move content), moderate analysis, multi-step Discord ops, "
+                    "anything needing tools but NOT the vault.\n\n"
+                    "VAULT: reading or writing vault files, session logs, ORACLE inbox, registry files, "
+                    "uploading documents, updating indexes or priorities, any file path containing "
+                    "TRINITYBRAIN or orchestration."
                 ),
                 messages=[{"role": "user", "content": text}],
             ),
             timeout=5,
         )
         result = response.content[0].text.strip().lower()
-        return "simple" if "simple" in result else "complex"
+        if "vault" in result:
+            return "vault"
+        if "simple" in result:
+            return "simple"
+        return "standard"
     except Exception:
-        return "complex"  # Default to full pipeline on classification failure
+        return "standard"  # Default to Sonnet on classification failure
 
 
 async def get_simple_response(messages: list[dict]) -> str:
@@ -1586,18 +1592,65 @@ async def get_simple_response(messages: list[dict]) -> str:
     return "".join(block.text for block in response.content if hasattr(block, "text"))
 
 
+async def get_sonnet_response(
+    messages: list[dict],
+    bot_ref: commands.Bot | None = None,
+    ctx_message: discord.Message | None = None,
+) -> str:
+    """
+    Standard tier — Sonnet 4.6 with Discord tools, no vault tools, no thinking.
+    Used for Discord management, general questions, moderate tasks.
+    """
+    client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    system = (
+        f"{SYSTEM_PROMPT}\n\n{PROJECT_CONTEXT}"
+        + (f"\n\n## Live Priorities\n{_dynamic_context}" if _dynamic_context else "")
+    )
+    tools = []
+    if bot_ref and ctx_message:
+        tools.extend(DISCORD_TOOLS)
+
+    loop_messages = list(messages)
+    for _ in range(6):
+        kwargs: dict = dict(
+            model="claude-sonnet-4-6",
+            max_tokens=4096,
+            system=system,
+            messages=loop_messages,
+        )
+        if tools:
+            kwargs["tools"] = tools
+        response = await client.messages.create(**kwargs)
+        if response.stop_reason != "tool_use":
+            return "".join(
+                block.text for block in response.content if hasattr(block, "text")
+            )
+        tool_results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                if block.name in DISCORD_TOOL_NAMES and bot_ref and ctx_message:
+                    result = await execute_discord_tool(block.name, block.input, bot_ref, ctx_message)
+                else:
+                    result = f"Tool '{block.name}' not available in standard tier."
+                tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(result)})
+        loop_messages = loop_messages + [
+            {"role": "assistant", "content": response.content},
+            {"role": "user", "content": tool_results},
+        ]
+    return "Done."
+
+
 async def get_claude_response(
     messages: list[dict],
     bot_ref: commands.Bot | None = None,
     ctx_message: discord.Message | None = None,
 ) -> str:
     """
-    Call Claude with vault + Discord tool use.
-    Uses Opus 4.6 with Sonnet 4.6 fallback on overload.
-    bot_ref and ctx_message are required for Discord tools to work.
+    Vault tier — Sonnet 4.6 with all tools (vault + Discord) and bounded thinking.
+    Used for vault reads/writes, session logs, ORACLE comms, complex analysis.
     """
     client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-    models = ["claude-opus-4-6", "claude-sonnet-4-6"]
+    models = ["claude-sonnet-4-6"]
     system = (
         f"{SYSTEM_PROMPT}\n\n{PROJECT_CONTEXT}"
         + (f"\n\n## Live Priorities\n{_dynamic_context}" if _dynamic_context else "")
@@ -1747,16 +1800,30 @@ async def on_message(message: discord.Message):
             # Build Claude conversation (async to support attachment downloads)
             messages = await build_conversation(message, history)
 
-            # Force complex tier if any attachments are present in the trigger message
+            # Determine tier — attachments force at least standard; vault keywords force vault
             has_attachments = bool(message.attachments)
-            tier = "complex" if has_attachments else await classify_message_tier(message.content)
+            vault_keywords = ("trinitybrain", "vault", "orchestration", "session log",
+                              "oracle inbox", "priorities.md", "sie-tasks", "registry")
+            has_vault_keywords = any(k in message.content.lower() for k in vault_keywords)
+
+            if has_vault_keywords:
+                tier = "vault"
+            elif has_attachments:
+                tier = "standard"
+            else:
+                tier = await classify_message_tier(message.content)
 
             try:
                 if tier == "simple":
                     response_text = await asyncio.wait_for(
                         get_simple_response(messages), timeout=30
                     )
-                else:
+                elif tier == "standard":
+                    response_text = await asyncio.wait_for(
+                        get_sonnet_response(messages, bot_ref=bot, ctx_message=message),
+                        timeout=90,
+                    )
+                else:  # vault
                     response_text = await asyncio.wait_for(
                         get_claude_response(messages, bot_ref=bot, ctx_message=message),
                         timeout=300,
